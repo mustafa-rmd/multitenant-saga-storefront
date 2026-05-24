@@ -1,0 +1,85 @@
+[project]
+name = "ecomm-django"
+version = "0.1.0"
+description = "Multi-tenant cart system POC for Acme coding assignment"
+requires-python = ">=3.12"
+readme = "README.md"
+
+dependencies = [
+    # --- Web framework ---
+    "django>=5.0,<6.0",
+    "djangorestframework>=3.15",
+    "drf-spectacular>=0.27",
+    "django-environ>=0.11",
+    "django-filter>=24.2",
+
+    # --- Database ---
+    "psycopg[binary,pool]>=3.2",
+
+    # --- Async / workers ---
+    "celery>=5.4",
+    "redis>=5.0",
+    "kombu>=5.3",
+    "django-celery-beat>=2.6",
+    "django-redis>=5.4",
+
+    # --- Payments ---
+    "stripe>=10.0",
+
+    # --- Invoices: PDF rendering + S3-compatible object storage ---
+    # reportlab is pure Python (no Cairo / Pango / GTK runtime), so the same
+    # invoice rendering works identically on Windows, macOS, Linux and slim
+    # Docker images. django-storages[s3] is the canonical Django backend for
+    # S3 and any S3-compatible service — we point it at MinIO in dev via
+    # AWS_S3_ENDPOINT_URL and at real S3 in prod by clearing that env var.
+    "reportlab>=4.2",
+    "django-storages[s3]>=1.14",
+
+    # --- Production server (used by docker) ---
+    "gunicorn>=22.0",
+    "uvicorn>=0.30",
+    "whitenoise>=6.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "ipython>=8.20",
+    "ipdb>=0.13",
+    "ruff>=0.5",
+    "honcho>=2.0",
+    "django-debug-toolbar>=4.4",
+    "django-extensions>=3.2",
+]
+# Tests have been migrated to Bun (TypeScript). See tests-ts/.
+
+[tool.setuptools.packages.find]
+include = ["apps*", "config*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+extend-exclude = [
+    ".venv",
+    "migrations",
+    "staticfiles",
+    "node_modules",
+    "tests-ts",
+]
+
+[tool.ruff.lint]
+# E,W = pycodestyle, F = pyflakes, I = isort, B = bugbear,
+# UP = pyupgrade, DJ = django, SIM = simplify
+select = ["E", "F", "I", "W", "B", "UP", "DJ", "SIM"]
+ignore = [
+    "E501",   # line length handled by formatter
+    "B008",   # function call in default arg (DRF / Django patterns)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"scripts/*" = ["E402"]  # seed scripts intentionally import after setup
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+

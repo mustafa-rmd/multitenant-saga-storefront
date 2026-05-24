@@ -1,0 +1,1629 @@
+{
+  "info": {
+    "_postman_id": "9b6d4a3f-1a2c-4f9e-9c1a-3a2b1c4d5e6f",
+    "name": "Acme Cart API",
+    "description": "Multi-tenant cart system with two parallel API surfaces:\n\n**Storefront** (customer-facing). Every cart endpoint operates on the authenticated customer's single active cart -- there is no cart_id in the URL because customer_id (from X-Customer-Id) determines the cart uniquely. Auth is the `X-Customer-Id` header set by the upstream identity proxy.\n\n**Admin** (operator-facing). Lives under `/api/v1/admin/`. Uses DRF token auth, not X-Customer-Id, so the two rails never share credentials. Tenant-admin endpoints run under the tenant's subdomain (RLS still applies); platform-admin endpoints run under `admin.acme.test` (BYPASSRLS via the `admin` DB alias).\n\nAll requests inherit headers from collection variables (`customerId`, `tenantHost`, `adminToken`, `adminHost`). Resource IDs are captured automatically by response-test scripts.\n\n**Recommended order (storefront):** Health → List Products → Add Address → Add Payment Method → Add Item → Set Shipping Address → Set Billing Address → Set Payment Method → Checkout → Get Order → Get Invoice.\n\n**Recommended order (admin):** Admin - Auth → Login (Tenant) → any Admin - Tenant call. Or Admin - Auth → Login (Platform) → any Admin - Platform call.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl",            "value": "http://localhost:8000/api/v1", "type": "string" },
+    { "key": "tenantHost",         "value": "store-a.acme.test",            "type": "string" },
+    { "key": "customerId",         "value": "00000000-0000-0000-0000-0000000000aa", "type": "string" },
+    { "key": "productId",          "value": "",                              "type": "string" },
+    { "key": "itemId",             "value": "",                              "type": "string" },
+    { "key": "addressId",          "value": "",                              "type": "string" },
+    { "key": "paymentMethodId",    "value": "",                              "type": "string" },
+    { "key": "orderId",            "value": "",                              "type": "string" },
+    { "key": "couponCode",         "value": "WELCOME10",                     "type": "string" },
+    { "key": "gatewayName",        "value": "mock",                          "type": "string" },
+    { "key": "idempotencyKey",     "value": "qa-run-001",                    "type": "string" },
+    { "key": "adminHost",          "value": "admin.acme.test",               "type": "string" },
+    { "key": "platformEmail",      "value": "platform@acme.test",            "type": "string" },
+    { "key": "platformPassword",   "value": "platform-pass",                 "type": "string" },
+    { "key": "ownerEmail",         "value": "owner-a@store-a.test",          "type": "string" },
+    { "key": "ownerPassword",      "value": "owner-a-pass",                  "type": "string" },
+    { "key": "adminToken",         "value": "",                              "type": "string" },
+    { "key": "adminProductId",     "value": "",                              "type": "string" },
+    { "key": "adminCouponId",      "value": "",                              "type": "string" },
+    { "key": "adminGatewayId",     "value": "",                              "type": "string" },
+    { "key": "newTenantId",        "value": "",                              "type": "string" },
+    { "key": "newTenantSubdomain", "value": "",                              "type": "string" },
+    { "key": "newMembershipId",    "value": "",                              "type": "string" },
+    { "key": "adminCustomerId",    "value": "",                              "type": "string" },
+    { "key": "customerSearchEmail","value": "alice",                         "type": "string" },
+    { "key": "invoicePdfUrl",      "value": "",                              "type": "string" },
+    { "key": "productImageUrl",    "value": "",                              "type": "string" }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Health Check",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": { "raw": "{{baseUrl}}/health", "host": ["{{baseUrl}}"], "path": ["health"] }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Products",
+      "item": [
+        {
+          "name": "List Products",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.length > 0) {",
+                  "  pm.collectionVariables.set('productId', json.data[0].id);",
+                  "  console.log('Captured productId =', json.data[0].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": { "raw": "{{baseUrl}}/products", "host": ["{{baseUrl}}"], "path": ["products"] },
+            "description": "List active products for the current tenant. Captures the first product's id into the `productId` collection variable for downstream requests."
+          }
+        },
+        {
+          "name": "List Products (filtered)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products?search=widget&currency=SAR&inStock=true&minPrice=10&maxPrice=10000&page=1&page_size=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["products"],
+              "query": [
+                { "key": "search",    "value": "widget", "description": "Case-insensitive substring across sku, name, description." },
+                { "key": "sku",       "value": "",       "description": "Exact SKU match (still tenant-scoped). Disabled by default.", "disabled": true },
+                { "key": "currency",  "value": "SAR",    "description": "ISO 4217 code (SAR, USD, ...)." },
+                { "key": "inStock",   "value": "true",   "description": "When true, only products with availableQuantity > 0." },
+                { "key": "minPrice",  "value": "10",     "description": "Inclusive lower bound on price." },
+                { "key": "maxPrice",  "value": "10000",  "description": "Inclusive upper bound on price." },
+                { "key": "page",      "value": "1",      "description": "Page number (1-based)." },
+                { "key": "page_size", "value": "20",     "description": "Page size (max 100)." }
+              ]
+            },
+            "description": "Same endpoint as List Products with all available filters wired up. Disable any param via the query-row checkbox in Postman to exclude it from the request. All filters are AND-combined."
+          }
+        },
+        {
+          "name": "Get Product",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/products/{{productId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["products", "{{productId}}"]
+            },
+            "description": "Retrieve a single product by id. Returns 404 if inactive or cross-tenant. Run **List Products** first to populate the `productId` collection variable."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Customers",
+      "item": [
+        {
+          "name": "List Addresses",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/addresses",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "addresses"]
+            },
+            "description": "List the authenticated customer's saved addresses. Bare list (no envelope). Default-first ordering."
+          }
+        },
+        {
+          "name": "Add Address",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const id = json && (json.data ? json.data.id : json.id);",
+                  "if (id) { pm.collectionVariables.set('addressId', id); console.log('Captured addressId =', id); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"country\": \"SA\",\n  \"city\": \"Riyadh\",\n  \"street\": \"King Fahd 1\",\n  \"postalCode\": \"12345\",\n  \"isDefault\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/addresses",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "addresses"]
+            }
+          }
+        },
+        {
+          "name": "Get Address",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/addresses/{{addressId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "addresses", "{{addressId}}"]
+            },
+            "description": "Retrieve a single saved address. 404 if not owned by the customer."
+          }
+        },
+        {
+          "name": "Update Address",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"street\": \"King Fahd 2\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/addresses/{{addressId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "addresses", "{{addressId}}"]
+            },
+            "description": "Partial update. Use PUT for a full replace."
+          }
+        },
+        {
+          "name": "Delete Address",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/addresses/{{addressId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "addresses", "{{addressId}}"]
+            },
+            "description": "Hard delete. Fails if still referenced by an active cart slot (clear the slot first). Orders snapshot their addresses so historical orders are unaffected."
+          }
+        },
+        {
+          "name": "List Payment Gateways",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const list = json && json.data;",
+                  "if (Array.isArray(list) && list.length) {",
+                  "  const def = list.find(g => g.isDefault) || list[0];",
+                  "  pm.collectionVariables.set('gatewayName', def.name);",
+                  "  console.log('Captured gatewayName =', def.name);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payment-gateways",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment-gateways"]
+            },
+            "description": "Discovery: which gateways does this tenant's storefront accept? Returns only active configs; the `mock` gateway is hidden when `PAYMENTS_ALLOW_MOCK_GATEWAY=False` (default in prod). Call this before Add Payment Method to know which `gatewayName` values are valid — the response captures the default into the `gatewayName` collection variable."
+          }
+        },
+        {
+          "name": "Get Payment Gateway",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/payment-gateways/{{gatewayName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["payment-gateways", "{{gatewayName}}"]
+            },
+            "description": "Detail / capabilities for one gateway. Same `name` / `displayName` / `isDefault` as the list, plus `supportedCurrencies` (empty = accept all), `tokenization` (`client` for Stripe.js-style, `server` for the mock), `supports3ds`, and `publicCredentials` (e.g. Stripe's `publishableKey`). Secrets like `secretKey` / `webhookSecret` are intentionally never in the response.\n\nReturns 404 if the gateway isn't configured for this tenant or if the `mock` gate is off — same behaviour as the list endpoint, so iterating the list is safe."
+          }
+        },
+        {
+          "name": "List Payment Methods",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/payment-methods",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "payment-methods"]
+            },
+            "description": "List saved payment methods. Tokens are redacted to brand + lastFour; the raw gateway token is never returned."
+          }
+        },
+        {
+          "name": "Add Payment Method",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const id = json && (json.data ? json.data.id : json.id);",
+                  "if (id) { pm.collectionVariables.set('paymentMethodId', id); console.log('Captured paymentMethodId =', id); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gatewayName\": \"{{gatewayName}}\",\n  \"brand\": \"visa\",\n  \"lastFour\": \"4242\",\n  \"isDefault\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/payment-methods",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "payment-methods"]
+            },
+            "description": "`gatewayName` must be one of the enum values (mock / stripe / hyperpay / tap) — anything else returns 400 with a field-level validation error. The gateway must also be configured and active for this tenant — otherwise 409 `gateway_not_configured`. `mock` is rejected when `PAYMENTS_ALLOW_MOCK_GATEWAY=False`. Run `List Payment Gateways` first to populate `{{gatewayName}}` from the tenant's actual config."
+          }
+        },
+        {
+          "name": "Add Payment Method (Purchase Order)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const id = json && (json.data ? json.data.id : json.id);",
+                  "if (id) { pm.collectionVariables.set('poPaymentMethodId', id); console.log('Captured poPaymentMethodId =', id); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{b2bCustomerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"methodType\": \"purchase_order\",\n  \"paymentTerms\": \"net_30\",\n  \"poAccountLabel\": \"Diana Industries net-30\",\n  \"isDefault\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{b2bCustomerId}}/payment-methods",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{b2bCustomerId}}", "payment-methods"]
+            },
+            "description": "B2B purchase-order payment method. Skips the gateway tokenize step — no `gatewayName` / `token` / `brand`. `paymentTerms` is required and snapshotted onto the order at checkout (one of `net_15` / `net_30` / `net_60` / `net_90`); `payment_due_date` is computed from it.\n\nRestricted to B2B customers: a B2C `customerId` returns `403 forbidden`. The seeded B2B customer is Diana (`{{b2bCustomerId}}`); to exercise this path swap `customerId → b2bCustomerId` for the rest of the storefront flow (addresses, cart items, Set Payment Method, Checkout). The checkout response will return `paymentStatus: \"invoice_pending\"` and `status: 202`, and the order stays in `pending` until `Mark Order Paid (admin)`."
+          }
+        },
+        {
+          "name": "Get Payment Method",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/payment-methods/{{paymentMethodId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "payment-methods", "{{paymentMethodId}}"]
+            }
+          }
+        },
+        {
+          "name": "Set Payment Method Default",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/payment-methods/{{paymentMethodId}}/default",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "payment-methods", "{{paymentMethodId}}", "default"]
+            },
+            "description": "Atomically clear any existing default and set this one. Idempotent."
+          }
+        },
+        {
+          "name": "Delete Payment Method",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/customers/{{customerId}}/payment-methods/{{paymentMethodId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["customers", "{{customerId}}", "payment-methods", "{{paymentMethodId}}"]
+            },
+            "description": "Hard delete. Fails if still referenced by an active cart slot."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Cart",
+      "item": [
+        {
+          "name": "Get Cart",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cart",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart"]
+            }
+          }
+        },
+        {
+          "name": "Abandon Cart",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cart",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart"]
+            },
+            "description": "Empty the active cart and mark it abandoned. Idempotent — returns 204 even if there was no active cart. The next Add Item lazy-creates a fresh cart."
+          }
+        },
+        {
+          "name": "Add Item",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const cart = json && (json.data || json);",
+                  "if (cart && cart.items && cart.items.length > 0) {",
+                  "  pm.collectionVariables.set('itemId', cart.items[cart.items.length - 1].id);",
+                  "  console.log('Captured itemId =', cart.items[cart.items.length - 1].id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"productId\": \"{{productId}}\",\n  \"quantity\": 2\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/items",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "items"]
+            }
+          }
+        },
+        {
+          "name": "Update Item Quantity",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"quantity\": 3\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "items", "{{itemId}}"]
+            },
+            "description": "Replace the line's quantity (does not increment — for that use POST /cart/items). Quantity 0 is rejected; use DELETE to remove. 409 insufficient_stock if quantity > availableQuantity."
+          }
+        },
+        {
+          "name": "Remove Item",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cart/items/{{itemId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "items", "{{itemId}}"]
+            }
+          }
+        },
+        {
+          "name": "Preview Coupon",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{couponCode}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/coupons/preview",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "coupons", "preview"]
+            },
+            "description": "Dry-run validation of a coupon code. Returns { valid, discount, projectedGrandTotal, ... } without persisting an AppliedCoupon or bumping cart version. Same failure codes as Apply Coupon."
+          }
+        },
+        {
+          "name": "Apply Coupon",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{couponCode}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/coupons",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "coupons"]
+            }
+          }
+        },
+        {
+          "name": "Remove Coupon",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/cart/coupons/{{couponCode}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "coupons", "{{couponCode}}"]
+            }
+          }
+        },
+        {
+          "name": "Set Shipping Address",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{addressId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/shipping-address",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "shipping-address"]
+            }
+          }
+        },
+        {
+          "name": "Set Billing Address",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{addressId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/billing-address",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "billing-address"]
+            }
+          }
+        },
+        {
+          "name": "Set Payment Method",
+          "request": {
+            "method": "PUT",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"{{paymentMethodId}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/payment-method",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "payment-method"]
+            }
+          }
+        },
+        {
+          "name": "Checkout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "const result = json && (json.data || json);",
+                  "const orderId = result && result.orderId;",
+                  "if (orderId) { pm.collectionVariables.set('orderId', orderId); console.log('Captured orderId =', orderId); }"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id",   "value": "{{customerId}}" },
+              { "key": "Host",            "value": "{{tenantHost}}" },
+              { "key": "Content-Type",    "value": "application/json" },
+              { "key": "Idempotency-Key", "value": "{{idempotencyKey}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"paymentMetadata\": {}\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/cart/checkout",
+              "host": ["{{baseUrl}}"],
+              "path": ["cart", "checkout"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "Orders",
+      "item": [
+        {
+          "name": "List Orders",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders?status=&page=1&page_size=20",
+              "host": ["{{baseUrl}}"],
+              "path": ["orders"],
+              "query": [
+                { "key": "status",    "value": "",   "description": "Filter by status: pending | paid | fulfilled | cancelled | refunded. Omit for all.", "disabled": true },
+                { "key": "page",      "value": "1",  "description": "Page number (1-based)." },
+                { "key": "page_size", "value": "20", "description": "Page size (max 100)." }
+              ]
+            },
+            "description": "Paginated order history for the authenticated customer, newest first."
+          }
+        },
+        {
+          "name": "Get Order",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{orderId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["orders", "{{orderId}}"]
+            }
+          }
+        },
+        {
+          "name": "Get Invoice",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.pdfUrl) {",
+                  "  pm.collectionVariables.set('invoicePdfUrl', json.data.pdfUrl);",
+                  "  console.log('Captured invoicePdfUrl =', json.data.pdfUrl);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{orderId}}/invoice",
+              "host": ["{{baseUrl}}"],
+              "path": ["orders", "{{orderId}}", "invoice"]
+            },
+            "description": "Returns the invoice envelope: invoiceNumber (per-tenant sequence), pdfUrl (real PDF in MinIO/S3 — populated by the same Celery task that creates the row, may be `\"\"` for a few hundred ms while the upload finishes), and issuedAt. Rendering is async, so this can 404 for ~1s after checkout — poll until it returns 200 with a non-empty pdfUrl, then run 'Download Invoice PDF' below to fetch the file itself."
+          }
+        },
+        {
+          "name": "Download Invoice PDF",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{invoicePdfUrl}}"
+            },
+            "description": "Fetches the rendered invoice PDF directly from object storage. In dev that's MinIO at http://localhost:9000/invoices/...; in prod it's whatever AWS_S3_ENDPOINT_URL points at. The bucket is public-read in dev (anonymous download policy), so no signing is needed and Postman shows the PDF inline in the response preview. Run 'Get Invoice' first to populate the invoicePdfUrl variable."
+          }
+        },
+        {
+          "name": "Cancel Order",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "X-Customer-Id", "value": "{{customerId}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/orders/{{orderId}}/cancel",
+              "host": ["{{baseUrl}}"],
+              "path": ["orders", "{{orderId}}", "cancel"]
+            },
+            "description": "Cancel a PENDING order: releases inventory reservations and marks any authorized payment as cancelled. Idempotent. 409 order_not_cancellable if the order is past the cancellable window (already paid or fulfilled — use refund instead)."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Webhooks",
+      "item": [
+        {
+          "name": "Payment Webhook (Mock)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type",        "value": "application/json" },
+              { "key": "X-Mock-Signature",    "value": "fake-signature-for-mock-gateway" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"id\": \"evt_mock_001\",\n  \"type\": \"payment_intent.succeeded\",\n  \"data\": {\n    \"object\": {\n      \"id\": \"pi_mock_001\",\n      \"status\": \"succeeded\"\n    }\n  }\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/webhooks/payments/{{gatewayName}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["webhooks", "payments", "{{gatewayName}}"]
+            },
+            "description": "Webhooks are exempt from auth and tenant resolution; the tenant is derived from the Payment row matched by gateway_transaction_id. This request mimics a Stripe-shaped event payload."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Auth",
+      "description": "Shared auth surface for both tenant-admin and platform-admin. Issues / revokes DRF tokens. Login is host-independent (in GLOBAL_EXEMPT_PATHS) -- you can run it against tenantHost or adminHost; only the subsequent calls care.",
+      "item": [
+        {
+          "name": "Login (Tenant Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.token) {",
+                  "  pm.collectionVariables.set('adminToken', json.data.token);",
+                  "  console.log('Captured adminToken (tenant) =', json.data.token.slice(0, 8) + '...');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Host",         "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{ownerEmail}}\",\n  \"password\": \"{{ownerPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "auth", "login"]
+            },
+            "description": "Exchange tenant-admin email + password for a DRF token. The token is captured into `adminToken` and reused by every Admin - Tenant request. Wrong credentials and unknown emails both return `401 invalid_credentials` (no user enumeration)."
+          }
+        },
+        {
+          "name": "Login (Platform Admin)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.token) {",
+                  "  pm.collectionVariables.set('adminToken', json.data.token);",
+                  "  console.log('Captured adminToken (platform) =', json.data.token.slice(0, 8) + '...');",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Host",         "value": "{{adminHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{platformEmail}}\",\n  \"password\": \"{{platformPassword}}\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/auth/login",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "auth", "login"]
+            },
+            "description": "Exchange platform-admin email + password for a DRF token. The token is captured into `adminToken` and reused by every Admin - Platform request. Superusers are also accepted by `IsTenantAdmin`, so you can use this token for Admin - Tenant calls too (useful for support escalations)."
+          }
+        },
+        {
+          "name": "Me",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/auth/me",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "auth", "me"]
+            },
+            "description": "Returns the current admin's id, email, isSuperuser flag, and tenant memberships. Superusers see `memberships: []`; tenant admins see one entry per (tenant, role) row."
+          }
+        },
+        {
+          "name": "Logout",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/auth/logout",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "auth", "logout"]
+            },
+            "description": "Deletes the token row. Subsequent calls with this token return 401. Re-login via the Login requests to refresh."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Tenant",
+      "description": "Per-tenant admin surface. Runs under the tenant's subdomain (`tenantHost`), so RLS still scopes queries to the resolved tenant. A tenant-admin token issued for store-a returns 403 when used against store-b.\n\nLog in via 'Admin - Auth → Login (Tenant Admin)' first to populate `adminToken`.",
+      "item": [
+        {
+          "name": "List Products",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/products?page_size=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products"],
+              "query": [{ "key": "page_size", "value": "100" }]
+            },
+            "description": "List products for the resolved tenant. Unlike the storefront list, includes inactive products too so admins can re-activate them."
+          }
+        },
+        {
+          "name": "Create Product",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('adminProductId', json.data.id);",
+                  "  console.log('Captured adminProductId =', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sku\": \"ADM-WIDGET-01\",\n  \"name\": \"Admin-created widget\",\n  \"description\": \"Created via Postman\",\n  \"price\": \"9.99\",\n  \"currency\": \"SAR\",\n  \"stockQuantity\": 25,\n  \"isActive\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/products",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products"]
+            },
+            "description": "Create a product on the resolved tenant. `tenant_id` is auto-populated from the request's tenant context (no need to pass it). The captured `adminProductId` is reused by the detail / update / delete requests below."
+          }
+        },
+        {
+          "name": "Get Product (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/products/{{adminProductId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products", "{{adminProductId}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Product",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"price\": \"19.99\",\n  \"stockQuantity\": 50\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/products/{{adminProductId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products", "{{adminProductId}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Product (soft)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/products/{{adminProductId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products", "{{adminProductId}}"]
+            },
+            "description": "Soft delete: flips `isActive=false`. Hard delete is refused because Product is referenced by historical CartItem and OrderItem rows."
+          }
+        },
+        {
+          "name": "Upload Product Image",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.imageUrl) {",
+                  "  pm.collectionVariables.set('productImageUrl', json.data.imageUrl);",
+                  "  console.log('Captured productImageUrl =', json.data.imageUrl);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "PNG / JPEG / WebP, max 5 MiB. Click 'Select Files' in Postman."
+                }
+              ]
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/products/{{adminProductId}}/image",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products", "{{adminProductId}}", "image"]
+            },
+            "description": "Multipart POST setting the product's primary image. Returns the full admin product including `imageKey` (stable storage key) and `imageUrl` (public URL via the `media` bucket on MinIO/S3). Re-uploading overwrites the existing object in place; changing format (png → webp) writes the new key and drops the old object automatically. Validation: png/jpeg/webp content-type, ≤ 5 MiB."
+          }
+        },
+        {
+          "name": "Download Product Image",
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{productImageUrl}}"
+            },
+            "description": "Fetches the rendered product image directly from object storage. The bucket is public-read in dev (anonymous download policy), so no auth or signing is needed. Run 'Upload Product Image' first to populate productImageUrl."
+          }
+        },
+        {
+          "name": "Delete Product Image",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/products/{{adminProductId}}/image",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "products", "{{adminProductId}}", "image"]
+            },
+            "description": "Clears the product's image: deletes the object from the media bucket and resets `image_key` to empty. Returns 204. The product row itself is untouched."
+          }
+        },
+        {
+          "name": "List Coupons",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/coupons",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "coupons"]
+            }
+          }
+        },
+        {
+          "name": "Create Coupon",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('adminCouponId', json.data.id);",
+                  "  console.log('Captured adminCouponId =', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"POSTMAN15\",\n  \"discountType\": \"percentage\",\n  \"discountValue\": \"15\",\n  \"minCartSubtotal\": \"100.00\",\n  \"isActive\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/coupons",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "coupons"]
+            },
+            "description": "Create a coupon. Code must be unique per tenant. `discountType` is `percentage` or `fixed`; fixed-discount coupons must specify `currency` matching the cart currency."
+          }
+        },
+        {
+          "name": "Update Coupon",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"maxUses\": 100\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/coupons/{{adminCouponId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "coupons", "{{adminCouponId}}"]
+            },
+            "description": "Code is immutable (existing carts and orders reference it). Everything else is mutable."
+          }
+        },
+        {
+          "name": "Delete Coupon (soft)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/coupons/{{adminCouponId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "coupons", "{{adminCouponId}}"]
+            },
+            "description": "Soft delete (`isActive=false`). Preserves order history."
+          }
+        },
+        {
+          "name": "List Payment Gateway Configs",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/payment-gateways",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "payment-gateways"]
+            }
+          }
+        },
+        {
+          "name": "Create Payment Gateway Config",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('adminGatewayId', json.data.id);",
+                  "  console.log('Captured adminGatewayId =', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gatewayName\": \"stripe\",\n  \"credentials\": {\n    \"api_key\": \"sk_test_replace_me\",\n    \"webhook_secret\": \"whsec_replace_me\"\n  },\n  \"isActive\": true,\n  \"isDefault\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/payment-gateways",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "payment-gateways"]
+            },
+            "description": "Setting `isDefault: true` clears the existing default for this tenant in the same transaction (only one default gateway per tenant is allowed)."
+          }
+        },
+        {
+          "name": "Update Payment Gateway Config",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"isActive\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/payment-gateways/{{adminGatewayId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "payment-gateways", "{{adminGatewayId}}"]
+            }
+          }
+        },
+        {
+          "name": "Delete Payment Gateway Config",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/payment-gateways/{{adminGatewayId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "payment-gateways", "{{adminGatewayId}}"]
+            },
+            "description": "Hard delete. `PaymentMethod.gateway_config` is `on_delete=PROTECT`, so configs that still have saved methods will 500 — clean those up first."
+          }
+        },
+        {
+          "name": "List Orders (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/orders?page_size=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "orders"],
+              "query": [
+                { "key": "page_size", "value": "100" },
+                { "key": "status",      "value": "pending", "disabled": true },
+                { "key": "customer_id", "value": "{{customerId}}", "disabled": true }
+              ]
+            },
+            "description": "Lists every order in the resolved tenant (storefront `/orders` is filtered to the calling customer). Optional `?status=` and `?customer_id=` filters — enable in the query tab.\n\nEach row uses `AdminOrderSerializer`, so it carries `customerId`, the full `payments` array (newest first, with `gatewayName` + `gatewayTransactionId` + `gatewayResponse` for reconciliation), and the linked `invoice` block. Scan for `status: \"paid\"` rows with an empty `invoice.pdfUrl` — those are the orders where the post-payment Celery task hasn't completed."
+          }
+        },
+        {
+          "name": "Get Order (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/orders/{{orderId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "orders", "{{orderId}}"]
+            },
+            "description": "Tenant admins can fetch any order in their tenant for support; the storefront `/orders/{id}` is restricted to the calling customer.\n\nUses `AdminOrderSerializer`: response includes `customerId`, nested `payments[]` (every Payment attempt with gateway txn ids + raw response), and `invoice` (`pdfUrl` non-empty = the post-payment chain succeeded end-to-end)."
+          }
+        },
+        {
+          "name": "List Order Payments (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/orders/{{orderId}}/payments",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "orders", "{{orderId}}", "payments"]
+            },
+            "description": "Dedicated payment-attempt history for one order, newest first. Same data as the nested `payments[]` on Get Order, but useful when the order page is heavy and you just need to confirm capture happened.\n\nResponse fields per row: `status`, `amount` + `currency`, `gatewayName`, `gatewayTransactionId` (the id to paste into Stripe/HyperPay dashboards), `idempotencyKey`, `gatewayResponse` (raw gateway JSON — admin-only, contains failure codes / last4 / sometimes IPs), `createdAt`, `updatedAt`."
+          }
+        },
+        {
+          "name": "Mark Order Paid (admin)",
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" },
+              { "key": "Content-Type",  "value": "application/json" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reference\": \"wire-2026-05-23-001\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/orders/{{orderId}}/mark-paid",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "orders", "{{orderId}}", "mark-paid"]
+            },
+            "description": "Tenant-admin flips a purchase-order (PO) order from `PENDING` to `PAID` once the invoice clears. Only valid for orders whose payment is in `INVOICE_PENDING` — the PO path through checkout. Card orders already get to `PAID` via the gateway capture flow; calling this on a card order is a no-op (returns the order unchanged) rather than an error.\n\nIdempotent — a second call on an already-PAID order returns the order as-is. The optional `reference` (wire id, cheque number, anything) is stored on `Payment.gateway_response.marked_paid_reference` for the audit trail."
+          }
+        },
+        {
+          "name": "List Customers (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers?page_size=100",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers"],
+              "query": [
+                { "key": "page_size",     "value": "100" },
+                { "key": "email",         "value": "alice",  "disabled": true },
+                { "key": "customer_type", "value": "B2B",    "disabled": true },
+                { "key": "is_active",     "value": "false",  "disabled": true }
+              ]
+            },
+            "description": "List Customer rows for the tenant. Includes soft-deleted (isActive=false) rows too. Optional filters in the query tab — enable to narrow."
+          }
+        },
+        {
+          "name": "Create Customer (B2B example)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('adminCustomerId', json.data.id);",
+                  "  console.log('Captured adminCustomerId =', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"qa-corp@test.local\",\n  \"name\": \"QA Corp contact\",\n  \"phone\": \"+966555111222\",\n  \"customerType\": \"B2B\",\n  \"taxId\": \"VAT-123456\",\n  \"companyName\": \"QA Corp Ltd\",\n  \"isActive\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers"]
+            },
+            "description": "Creates the application record only — the upstream identity proxy must also know about the email before the customer can log in. Useful for B2B pre-provisioning. B2B customers must include taxId + companyName; B2C may omit them. Duplicate emails on the same tenant return 422."
+          }
+        },
+        {
+          "name": "Get Customer (admin)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{adminCustomerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{adminCustomerId}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Customer",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"QA Corp (renamed)\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{adminCustomerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{adminCustomerId}}"]
+            },
+            "description": "Email is immutable. PATCH isActive=false to block the customer, isActive=true to unblock."
+          }
+        },
+        {
+          "name": "Block Customer (PATCH isActive=false)",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{ \"isActive\": false }"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{adminCustomerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{adminCustomerId}}"]
+            },
+            "description": "Same effect as the DELETE request below — CustomerAuthMiddleware refuses X-Customer-Id lookups for inactive customers (401 customer_not_found, no enumeration)."
+          }
+        },
+        {
+          "name": "Delete Customer (soft)",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{tenantHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/customers/{{adminCustomerId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "customers", "{{adminCustomerId}}"]
+            },
+            "description": "Soft delete: flips isActive=false. Hard delete is impossible because Order references Customer with on_delete=PROTECT."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Admin - Platform",
+      "description": "Cross-tenant ops. Runs under `admin.acme.test`, with tenant resolution skipped (GLOBAL_EXEMPT_PATHS) and ORM routed through the `app_admin` DB alias (BYPASSRLS). Requires `User.is_superuser=True`.\n\nLog in via 'Admin - Auth → Login (Platform Admin)' first to populate `adminToken`.",
+      "item": [
+        {
+          "name": "List Tenants",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/tenants",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "tenants"]
+            }
+          }
+        },
+        {
+          "name": "Create Tenant",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('newTenantId', json.data.id);",
+                  "  pm.collectionVariables.set('newTenantSubdomain', json.data.subdomain);",
+                  "  console.log('Captured newTenantId =', json.data.id, 'subdomain =', json.data.subdomain);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Test Store\",\n  \"subdomain\": \"postman-test\",\n  \"defaultCurrency\": \"USD\",\n  \"isActive\": true\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/tenants",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "tenants"]
+            },
+            "description": "Creates the tenant row, then provisions per-tenant Postgres sequences (`order_number_seq_<uuid>`, `invoice_number_seq_<uuid>`) on the admin DB alias. Reserved subdomains (www, api, admin, static, media) are rejected with 422."
+          }
+        },
+        {
+          "name": "Get Tenant",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/tenants/{{newTenantId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "tenants", "{{newTenantId}}"]
+            }
+          }
+        },
+        {
+          "name": "Update Tenant",
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Postman Test Store (renamed)\",\n  \"isActive\": false\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/tenants/{{newTenantId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "tenants", "{{newTenantId}}"]
+            },
+            "description": "Subdomain is immutable: it's the routing identity. Changing it would break in-flight URLs, customer bookmarks, and any gateway webhook callbacks registered against the old hostname."
+          }
+        },
+        {
+          "name": "Assign Tenant Admin (create user inline)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json && json.data && json.data.id) {",
+                  "  pm.collectionVariables.set('newMembershipId', json.data.id);",
+                  "  console.log('Captured newMembershipId =', json.data.id);",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Content-Type",  "value": "application/json" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"new-owner@postman-test.local\",\n  \"role\": \"tenant_admin\",\n  \"createUserIfMissing\": true,\n  \"initialPassword\": \"first-pass-123\",\n  \"firstName\": \"New\",\n  \"lastName\": \"Owner\"\n}"
+            },
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/tenants/{{newTenantId}}/memberships",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "tenants", "{{newTenantId}}", "memberships"]
+            },
+            "description": "Bind a Django User to the new tenant as a tenant-admin. `createUserIfMissing: true` provisions the User inline using `initialPassword` (which the new admin should rotate) and requires `firstName` + `lastName`. Idempotent: assigning the same (user, tenant) twice updates the role rather than 409-ing."
+          }
+        },
+        {
+          "name": "Revoke Membership",
+          "request": {
+            "method": "DELETE",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/memberships/{{newMembershipId}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "memberships", "{{newMembershipId}}"]
+            },
+            "description": "Hard-delete the membership row. The user's existing token (if any) survives until their next admin request, which then 401s because `IsTenantAdmin` re-checks membership on every call."
+          }
+        },
+        {
+          "name": "Search Customers (cross-tenant)",
+          "request": {
+            "method": "GET",
+            "header": [
+              { "key": "Authorization", "value": "Token {{adminToken}}" },
+              { "key": "Host",          "value": "{{adminHost}}" }
+            ],
+            "url": {
+              "raw": "{{baseUrl}}/admin/platform/customers?email={{customerSearchEmail}}",
+              "host": ["{{baseUrl}}"],
+              "path": ["admin", "platform", "customers"],
+              "query": [
+                { "key": "email",            "value": "{{customerSearchEmail}}" },
+                { "key": "tenant_subdomain", "value": "store-a", "disabled": true }
+              ]
+            },
+            "description": "Cross-tenant customer search for Zid support. Mandatory ?email= (substring match) so the endpoint can't accidentally dump the whole customer table; missing email returns 400 email_query_required. Each row in the response includes tenantSubdomain so support can hop into the right store. Tenant-admin tokens get 403 here (IsPlatformAdmin requires superuser)."
+          }
+        }
+      ]
+    }
+  ]
+}

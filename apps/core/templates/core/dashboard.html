@@ -1,0 +1,850 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Acme Cart — Operator Dashboard</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    :root {
+      --brand: #5b2a86;
+      --brand-dark: #3f1c5f;
+      --ink: #1a1530;
+      --muted: #6b6680;
+      --rule: #e5e1f0;
+      --surface: #f7f4fc;
+      --ok: #0ea371;
+      --warn: #c2750a;
+      --bad: #c33636;
+      --info: #2a6fbf;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+      margin: 0; background: #fafafa; color: var(--ink);
+    }
+    header {
+      background: var(--brand); color: #fff; padding: 14px 24px;
+      display: flex; align-items: center; gap: 16px;
+    }
+    header h1 { margin: 0; font-size: 18px; font-weight: 600; letter-spacing: 0.2px; }
+    header .tag { font-size: 11px; padding: 2px 8px; background: var(--brand-dark); border-radius: 10px; }
+    header .spacer { flex: 1; }
+    header .who { font-size: 12px; opacity: 0.9; }
+    header button {
+      background: transparent; color: #fff; border: 1px solid rgba(255,255,255,0.4);
+      padding: 4px 12px; border-radius: 4px; font-size: 12px; cursor: pointer;
+    }
+    header button:hover { background: rgba(255,255,255,0.15); }
+    header .health {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-size: 11px; padding: 3px 10px; border-radius: 12px;
+      background: rgba(255,255,255,0.12); cursor: help;
+    }
+    header .health .dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      background: #999; box-shadow: 0 0 6px rgba(0,0,0,0.2);
+    }
+    header .health.ok   .dot { background: #2cdc94; box-shadow: 0 0 6px #2cdc94; }
+    header .health.warn .dot { background: #ffce4a; box-shadow: 0 0 6px #ffce4a; }
+    header .health.bad  .dot { background: #ff6b6b; box-shadow: 0 0 6px #ff6b6b; }
+    header .ext-links { display: flex; gap: 8px; font-size: 11px; }
+    header .ext-links a { color: rgba(255,255,255,0.85); text-decoration: none; padding: 3px 8px; border: 1px solid rgba(255,255,255,0.25); border-radius: 4px; }
+    header .ext-links a:hover { background: rgba(255,255,255,0.15); color: #fff; }
+
+    main { max-width: 1400px; margin: 0 auto; padding: 20px 24px; }
+
+    .login {
+      max-width: 380px; margin: 80px auto; padding: 32px;
+      background: #fff; border-radius: 8px; box-shadow: 0 2px 12px rgba(0,0,0,0.06);
+    }
+    .login h2 { margin: 0 0 16px; font-size: 16px; }
+    .login label { display: block; font-size: 12px; color: var(--muted); margin: 12px 0 4px; }
+    .login input {
+      width: 100%; padding: 8px 10px; font-size: 14px;
+      border: 1px solid var(--rule); border-radius: 4px;
+    }
+    .login input:focus { outline: none; border-color: var(--brand); }
+    .login button {
+      width: 100%; margin-top: 18px; padding: 9px;
+      background: var(--brand); color: #fff; border: 0; border-radius: 4px;
+      font-size: 14px; cursor: pointer;
+    }
+    .login button:hover { background: var(--brand-dark); }
+    .login .hint { font-size: 11px; color: var(--muted); margin-top: 10px; line-height: 1.5; }
+    .err {
+      color: var(--bad); font-size: 12px; margin-top: 10px;
+      background: #fdecec; padding: 6px 10px; border-radius: 4px;
+    }
+
+    /* Stats strip */
+    .stats {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 12px; margin-bottom: 16px;
+    }
+    .stat {
+      background: #fff; border: 1px solid var(--rule); border-radius: 6px;
+      padding: 12px 16px;
+    }
+    .stat .label { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; }
+    .stat .value { font-size: 22px; font-weight: 600; color: var(--ink); margin-top: 4px; }
+    .stat .sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+    .stat.warn .value { color: var(--warn); }
+    .stat.bad  .value { color: var(--bad); }
+    .stat.ok   .value { color: var(--ok); }
+
+    /* Stuck items */
+    .stuck {
+      background: #fff; border: 1px solid var(--rule); border-radius: 6px;
+      margin-bottom: 16px; overflow: hidden;
+    }
+    .stuck .head {
+      padding: 10px 16px; cursor: pointer;
+      display: flex; align-items: center; gap: 10px; font-size: 13px; font-weight: 600;
+      border-bottom: 1px solid transparent;
+    }
+    .stuck.open .head { border-bottom-color: var(--rule); }
+    .stuck .head .chev { color: var(--muted); font-size: 10px; transition: transform 0.15s; }
+    .stuck.open .head .chev { transform: rotate(90deg); }
+    .stuck .head .count {
+      margin-left: auto; font-size: 11px; padding: 2px 8px; border-radius: 10px;
+      background: var(--warn); color: #fff; font-weight: 600;
+    }
+    .stuck .head .count.bad { background: var(--bad); }
+    .stuck .head .count.zero { background: var(--ok); }
+    .stuck .body { padding: 0 16px 12px; font-size: 12px; }
+    .stuck.closed .body { display: none; }
+    .stuck h5 { margin: 12px 0 4px; font-size: 11px; color: var(--brand); text-transform: uppercase; letter-spacing: 0.5px; }
+    .stuck ul { margin: 0; padding-left: 18px; line-height: 1.7; }
+    .stuck li button {
+      background: transparent; border: 1px solid var(--rule); color: var(--brand);
+      padding: 1px 8px; font-size: 11px; border-radius: 3px; cursor: pointer; margin-left: 6px;
+    }
+    .stuck li button:hover { background: var(--surface); }
+    .stuck .none { color: var(--muted); font-style: italic; padding: 8px 0; }
+
+    /* Toolbar */
+    .toolbar {
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
+      margin-bottom: 16px;
+      background: #fff; padding: 12px 16px; border-radius: 6px; border: 1px solid var(--rule);
+    }
+    .toolbar label { font-size: 12px; color: var(--muted); }
+    .toolbar select, .toolbar input {
+      padding: 5px 8px; font-size: 13px;
+      border: 1px solid var(--rule); border-radius: 4px;
+    }
+    .toolbar .pill-group { display: inline-flex; border: 1px solid var(--rule); border-radius: 4px; overflow: hidden; }
+    .toolbar .pill-group button {
+      background: #fff; color: var(--ink); border: 0; border-right: 1px solid var(--rule);
+      padding: 5px 10px; font-size: 12px; cursor: pointer;
+    }
+    .toolbar .pill-group button:last-child { border-right: 0; }
+    .toolbar .pill-group button.active { background: var(--brand); color: #fff; }
+    .toolbar .spacer { flex: 1; }
+    .toolbar button.primary {
+      padding: 5px 14px; font-size: 13px;
+      background: var(--brand); color: #fff; border: 0; border-radius: 4px; cursor: pointer;
+    }
+    .toolbar button.primary:hover { background: var(--brand-dark); }
+    .toolbar button.secondary {
+      padding: 5px 14px; font-size: 13px;
+      background: #fff; color: var(--brand); border: 1px solid var(--brand);
+      border-radius: 4px; cursor: pointer;
+    }
+    .toolbar button.secondary:hover { background: var(--surface); }
+    .toolbar .count { font-size: 12px; color: var(--muted); }
+    .toolbar .auto-refresh { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 4px; }
+
+    table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 6px; overflow: hidden; }
+    th, td { padding: 10px 14px; text-align: left; font-size: 13px; border-bottom: 1px solid var(--rule); }
+    th { background: var(--surface); font-weight: 600; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { color: var(--brand); }
+    th .sort-arrow { color: var(--brand); margin-left: 4px; font-size: 10px; }
+    tr.order-row { cursor: pointer; }
+    tr.order-row:hover { background: var(--surface); }
+    tr.order-row.stuck-row { background: #fffaf0; }
+    tr.order-row.stuck-row:hover { background: #fff3dc; }
+    tr.detail-row { background: #fdfcff; }
+    tr.detail-row td { padding: 0; }
+    .detail { padding: 14px 18px; }
+    .detail h4 { margin: 8px 0 6px; font-size: 12px; color: var(--brand); text-transform: uppercase; letter-spacing: 0.6px; }
+    .detail .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .detail .kv { font-size: 12px; line-height: 1.8; }
+    .detail .kv b { color: var(--muted); font-weight: 500; display: inline-block; min-width: 110px; }
+    .detail ul { margin: 4px 0; padding-left: 20px; font-size: 12px; }
+    .detail .raw {
+      font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+      font-size: 11px; background: #1a1530; color: #e5e1f0;
+      padding: 10px 14px; border-radius: 4px; overflow-x: auto;
+      white-space: pre-wrap; word-break: break-word; max-height: 240px; overflow-y: auto;
+    }
+    .detail .mark-paid {
+      background: var(--ok); color: #fff; border: 0; padding: 6px 14px;
+      border-radius: 4px; font-size: 12px; cursor: pointer; margin-top: 8px;
+    }
+    .detail .mark-paid:hover { background: #0a7c56; }
+    .detail .mark-paid:disabled { background: #ccc; cursor: not-allowed; }
+
+    .badge { font-size: 10px; padding: 2px 7px; border-radius: 10px; font-weight: 600; text-transform: uppercase; }
+    .b-paid       { background: #d4f5e3; color: var(--ok); }
+    .b-pending    { background: #fdf2db; color: var(--warn); }
+    .b-cancelled  { background: #ffe4e4; color: var(--bad); }
+    .b-fulfilled  { background: #d6e7fa; color: var(--info); }
+    .b-refunded   { background: #ebebf0; color: var(--muted); }
+    .b-default    { background: #ebebf0; color: var(--muted); }
+
+    .pi-status-captured       { color: var(--ok); font-weight: 600; }
+    .pi-status-pending,
+    .pi-status-authorized,
+    .pi-status-invoice_pending{ color: var(--warn); font-weight: 600; }
+    .pi-status-failed,
+    .pi-status-cancelled      { color: var(--bad); font-weight: 600; }
+
+    .empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+    .loading { text-align: center; padding: 30px; color: var(--muted); font-size: 13px; }
+
+    .toast {
+      position: fixed; bottom: 20px; right: 20px;
+      background: var(--ink); color: #fff; padding: 12px 18px;
+      border-radius: 6px; font-size: 13px; box-shadow: 0 4px 16px rgba(0,0,0,0.2);
+      max-width: 400px; z-index: 1000;
+    }
+    .toast.ok  { background: var(--ok); }
+    .toast.bad { background: var(--bad); }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <div id="toast-container"></div>
+
+<script>
+const API = "/api/v1";
+const TOKEN_KEY = "acmeDashToken";
+const EMAIL_KEY = "acmeDashEmail";
+const USER_KEY  = "acmeDashUser";       // { isSuperuser, memberships }
+const STUCK_AGE_MIN = 10;               // payments PENDING > this = stuck
+
+let state = {
+  token: localStorage.getItem(TOKEN_KEY) || null,
+  email: localStorage.getItem(EMAIL_KEY) || null,
+  user:  JSON.parse(localStorage.getItem(USER_KEY) || "null"),
+  orders: [],
+  expanded: null,
+  filter: { status: "", customerId: "", emailQuery: "", dateRange: "all" },
+  sort: { key: "createdAt", dir: "desc" },
+  loading: false,
+  err: null,
+  health: { status: "unknown", checks: null, fetchedAt: null },
+  stuckOpen: true,
+  autoRefresh: false,
+  autoRefreshTimer: null,
+  healthTimer: null,
+};
+
+// ---------------------------------------------------------------------------
+// HTTP
+// ---------------------------------------------------------------------------
+async function api(path, opts = {}) {
+  const headers = { Accept: "application/json", ...opts.headers };
+  if (state.token && !opts.noAuth) headers.Authorization = "Token " + state.token;
+  if (opts.body) headers["Content-Type"] = "application/json";
+  let res;
+  try {
+    res = await fetch(API + path, {
+      method: opts.method || "GET",
+      headers,
+      body: opts.body ? JSON.stringify(opts.body) : undefined,
+    });
+  } catch (e) {
+    return { status: 0, body: { error: String(e) } };
+  }
+  const text = await res.text();
+  let body = {};
+  try { body = text ? JSON.parse(text) : {}; } catch { body = { rawText: text }; }
+  // Suppress the auto-logout side effect for background polls so a transient
+  // 401 on /health doesn't kick the user out mid-session.
+  if (res.status === 401 && state.token && !opts.silent) {
+    state.token = null;
+    localStorage.removeItem(TOKEN_KEY);
+    state.err = "session expired — log in again";
+    render();
+  }
+  return { status: res.status, body };
+}
+
+// ---------------------------------------------------------------------------
+// Actions
+// ---------------------------------------------------------------------------
+async function login(email, password) {
+  state.err = null; render();
+  const r = await api("/admin/auth/login", { method: "POST", body: { email, password }, noAuth: true });
+  if (r.status !== 200 || !r.body.data) {
+    state.err = "login failed: " + (r.body.errors?.[0]?.detail || ("HTTP " + r.status));
+    render();
+    return;
+  }
+  state.token = r.body.data.token;
+  state.email = r.body.data.user.email;
+  state.user  = {
+    isSuperuser: !!r.body.data.user.isSuperuser,
+    memberships: r.body.data.user.memberships || [],
+  };
+  localStorage.setItem(TOKEN_KEY, state.token);
+  localStorage.setItem(EMAIL_KEY, state.email);
+  localStorage.setItem(USER_KEY,  JSON.stringify(state.user));
+  bootTimers();
+  await Promise.all([loadOrders(), loadHealth()]);
+}
+
+function logout() {
+  api("/admin/auth/logout", { method: "POST" }).catch(() => {});
+  stopTimers();
+  state.token = null; state.email = null; state.user = null;
+  state.orders = []; state.expanded = null;
+  state.health = { status: "unknown", checks: null, fetchedAt: null };
+  localStorage.removeItem(TOKEN_KEY);
+  localStorage.removeItem(EMAIL_KEY);
+  localStorage.removeItem(USER_KEY);
+  render();
+}
+
+async function loadOrders() {
+  state.loading = true; state.err = null; render();
+  // Pull a broad slice; date / email / sort all applied client-side so
+  // changing filters doesn't round-trip. page_size capped at 100 by the
+  // backend's StandardPagination.
+  const q = new URLSearchParams({ page_size: "100" });
+  if (state.filter.status)     q.set("status", state.filter.status);
+  if (state.filter.customerId) q.set("customer_id", state.filter.customerId);
+  const r = await api("/admin/orders?" + q.toString(), { silent: true });
+  state.loading = false;
+  if (r.status === 200) {
+    state.orders = r.body.data || r.body.results || [];
+  } else if (r.status !== 0) {
+    state.err = "load failed: HTTP " + r.status;
+  }
+  render();
+}
+
+async function loadHealth() {
+  const r = await api("/health", { noAuth: true, silent: true });
+  if (r.status === 0) {
+    state.health = { status: "bad", checks: null, fetchedAt: new Date() };
+  } else if (r.status === 200) {
+    const checks = r.body.data?.checks || r.body.checks || {};
+    // All sub-checks must report a truthy / healthy value.
+    const allOk = Object.values(checks).every(v =>
+      v === true || v === "ok" || v === "healthy"
+      || (v && (v.ok === true || v.status === "ok" || v.status === "healthy"))
+    );
+    state.health = { status: allOk ? "ok" : "warn", checks, fetchedAt: new Date() };
+  } else {
+    state.health = { status: "warn", checks: null, fetchedAt: new Date() };
+  }
+  // Re-render only the header to avoid wiping a focused input mid-typing.
+  renderHeaderOnly();
+}
+
+async function markPaid(orderId) {
+  const r = await api("/admin/orders/" + orderId + "/mark-paid", {
+    method: "POST",
+    body: { reference: "dashboard-" + new Date().toISOString() },
+  });
+  if (r.status === 200) {
+    toast("ok", "Marked order as paid.");
+    await loadOrders();
+  } else {
+    toast("bad", "mark-paid failed: " + (r.body.errors?.[0]?.detail || ("HTTP " + r.status)));
+  }
+}
+
+async function runReconcile() {
+  toast("info", "Running payment reconciliation sweep…");
+  const r = await api("/admin/platform/ops/reconcile-payments", {
+    method: "POST",
+    headers: { Host: "admin.acme.test" },  // ignored by fetch, server uses real Host
+  });
+  if (r.status === 200) {
+    const s = r.body.data || r.body;
+    toast("ok",
+      `Reconcile done: scanned=${s.scanned ?? 0} ` +
+      `converged=${s.converged ?? 0} cancelled=${s.cancelled ?? 0} ` +
+      `still_pending=${s.stillPending ?? s.still_pending ?? 0}`);
+    await loadOrders();
+  } else {
+    toast("bad", "Reconcile failed: " + (r.body.errors?.[0]?.detail || ("HTTP " + r.status)));
+  }
+}
+
+async function searchByEmail() {
+  const q = state.filter.emailQuery.trim();
+  if (!q) {
+    state.filter.customerId = "";
+    await loadOrders();
+    return;
+  }
+  // Resolve email substring → customer IDs via /admin/customers, then
+  // pass the first match through the orders filter. (Multiple matches
+  // would need OR-filtering which the API doesn't expose; surface the
+  // first match clearly.)
+  const r = await api("/admin/customers?email=" + encodeURIComponent(q), { silent: true });
+  if (r.status !== 200) { toast("bad", "Customer search failed."); return; }
+  const rows = r.body.data || r.body.results || [];
+  if (rows.length === 0) {
+    state.orders = []; state.err = `No customer matches "${q}".`; render(); return;
+  }
+  state.filter.customerId = rows[0].id;
+  toast("ok", `Filtering to ${rows[0].email}${rows.length > 1 ? ` (+${rows.length - 1} more matched, showing the first)` : ""}.`);
+  await loadOrders();
+}
+
+function clearFilters() {
+  state.filter = { status: "", customerId: "", emailQuery: "", dateRange: "all" };
+  loadOrders();
+}
+
+// ---------------------------------------------------------------------------
+// Derived data
+// ---------------------------------------------------------------------------
+function startOf(range) {
+  const d = new Date();
+  d.setHours(0, 0, 0, 0);
+  if (range === "today") return d;
+  if (range === "7d")    { d.setDate(d.getDate() - 7); return d; }
+  if (range === "30d")   { d.setDate(d.getDate() - 30); return d; }
+  return null;
+}
+
+function filteredOrders() {
+  let rows = state.orders;
+  const cutoff = startOf(state.filter.dateRange);
+  if (cutoff) rows = rows.filter(o => new Date(o.createdAt) >= cutoff);
+  rows = [...rows].sort((a, b) => {
+    const k = state.sort.key;
+    const av = a[k], bv = b[k];
+    let cmp;
+    if (k === "grandTotal" || k === "orderNumber") cmp = Number(av) - Number(bv);
+    else if (k === "createdAt") cmp = new Date(av) - new Date(bv);
+    else cmp = String(av).localeCompare(String(bv));
+    return state.sort.dir === "asc" ? cmp : -cmp;
+  });
+  return rows;
+}
+
+function computeStats(rows) {
+  const today = startOf("today");
+  const todays = rows.filter(o => new Date(o.createdAt) >= today);
+  const paidToday = todays.filter(o => o.status === "paid" || o.status === "fulfilled");
+  const currencies = {};
+  for (const o of paidToday) {
+    currencies[o.currency] = (currencies[o.currency] || 0) + Number(o.grandTotal);
+  }
+  const revenueParts = Object.entries(currencies).map(([c, v]) => `${v.toFixed(2)} ${c}`);
+  return {
+    todayCount:    todays.length,
+    paidCount:     rows.filter(o => o.status === "paid" || o.status === "fulfilled").length,
+    pendingCount:  rows.filter(o => o.status === "pending").length,
+    revenue:       revenueParts.join("  ·  ") || "—",
+  };
+}
+
+function computeStuck(rows) {
+  const cutoff = new Date(Date.now() - STUCK_AGE_MIN * 60000);
+  const orphanedAuth = [];   // PENDING > N min with no gateway_transaction_id
+  const missingInvoice = []; // status=paid with no invoice.pdfUrl
+  const awaitingMarkPaid = []; // status=pending with an invoice_pending payment
+  for (const o of rows) {
+    if (o.status === "paid" && (!o.invoice || !o.invoice.pdfUrl)) {
+      missingInvoice.push(o);
+    }
+    if (o.status === "pending") {
+      for (const p of (o.payments || [])) {
+        if (p.status === "pending" && !p.gatewayTransactionId
+            && new Date(p.updatedAt) < cutoff) {
+          orphanedAuth.push({ order: o, payment: p });
+        }
+        if (p.status === "invoice_pending") {
+          awaitingMarkPaid.push(o); break;
+        }
+      }
+    }
+  }
+  return { orphanedAuth, missingInvoice, awaitingMarkPaid,
+           total: orphanedAuth.length + missingInvoice.length + awaitingMarkPaid.length };
+}
+
+// ---------------------------------------------------------------------------
+// Toasts
+// ---------------------------------------------------------------------------
+function toast(kind, msg) {
+  const el = document.createElement("div");
+  el.className = "toast " + (kind || "");
+  el.textContent = msg;
+  document.getElementById("toast-container").appendChild(el);
+  setTimeout(() => el.remove(), 4500);
+}
+
+// ---------------------------------------------------------------------------
+// Timers
+// ---------------------------------------------------------------------------
+function bootTimers() {
+  stopTimers();
+  state.healthTimer = setInterval(loadHealth, 30000);
+  if (state.autoRefresh) {
+    state.autoRefreshTimer = setInterval(loadOrders, 10000);
+  }
+}
+
+function stopTimers() {
+  if (state.healthTimer)        { clearInterval(state.healthTimer); state.healthTimer = null; }
+  if (state.autoRefreshTimer)   { clearInterval(state.autoRefreshTimer); state.autoRefreshTimer = null; }
+}
+
+function toggleAutoRefresh(on) {
+  state.autoRefresh = on;
+  if (on) {
+    state.autoRefreshTimer = setInterval(loadOrders, 10000);
+  } else if (state.autoRefreshTimer) {
+    clearInterval(state.autoRefreshTimer); state.autoRefreshTimer = null;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Render helpers
+// ---------------------------------------------------------------------------
+function statusBadge(s) {
+  const cls = ({ paid: "b-paid", pending: "b-pending", cancelled: "b-cancelled",
+                 fulfilled: "b-fulfilled", refunded: "b-refunded" })[s] || "b-default";
+  return `<span class="badge ${cls}">${s}</span>`;
+}
+
+function fmtMoney(v, cur) { return `${v} ${cur}`; }
+function fmtDate(s) { return s ? new Date(s).toLocaleString() : ""; }
+function fmtAge(s) {
+  if (!s) return "";
+  const m = Math.floor((Date.now() - new Date(s)) / 60000);
+  if (m < 60) return `${m}m ago`;
+  if (m < 1440) return `${Math.floor(m / 60)}h ago`;
+  return `${Math.floor(m / 1440)}d ago`;
+}
+
+function headerHtml() {
+  const h = state.health;
+  const cls = h.status === "ok" ? "ok" : h.status === "warn" ? "warn" : h.status === "bad" ? "bad" : "";
+  const tip = h.checks
+    ? Object.entries(h.checks).map(([k, v]) => `${k}: ${typeof v === "object" ? (v.status || JSON.stringify(v)) : v}`).join("\n")
+    : "polling…";
+  return `
+    <header>
+      <h1>Acme Cart</h1>
+      <span class="tag">Operator Dashboard</span>
+      <span class="health ${cls}" title="${tip.replace(/"/g, "&quot;")}">
+        <span class="dot"></span>${h.status}${h.fetchedAt ? ` · ${fmtAge(h.fetchedAt)}` : ""}
+      </span>
+      <div class="spacer"></div>
+      <div class="ext-links">
+        <a href="http://localhost:5555" target="_blank">Flower</a>
+        <a href="http://localhost:15672" target="_blank">RabbitMQ</a>
+        <a href="https://dashboard.stripe.com/test" target="_blank">Stripe</a>
+        <a href="${API}/docs/" target="_blank">Swagger</a>
+      </div>
+      <span class="who">${state.email || ""}${state.user?.isSuperuser ? " (platform)" : ""}</span>
+      <button onclick="logout()">Log out</button>
+    </header>
+  `;
+}
+
+function renderHeaderOnly() {
+  const h = document.querySelector("header");
+  if (!h) return;
+  const tmp = document.createElement("div");
+  tmp.innerHTML = headerHtml();
+  h.replaceWith(tmp.firstElementChild);
+}
+
+function statsHtml(stats, stuck) {
+  return `
+    <div class="stats">
+      <div class="stat"><div class="label">Orders today</div><div class="value">${stats.todayCount}</div><div class="sub">across all statuses</div></div>
+      <div class="stat ok"><div class="label">Revenue today</div><div class="value" style="font-size:14px; padding-top:6px;">${stats.revenue}</div><div class="sub">paid + fulfilled</div></div>
+      <div class="stat ${stats.pendingCount > 0 ? 'warn' : ''}"><div class="label">Pending</div><div class="value">${stats.pendingCount}</div><div class="sub">awaiting payment</div></div>
+      <div class="stat ${stuck.total > 0 ? 'bad' : 'ok'}"><div class="label">Stuck items</div><div class="value">${stuck.total}</div><div class="sub">need attention</div></div>
+      <div class="stat"><div class="label">In view</div><div class="value">${state.orders.length}</div><div class="sub">of ≤100 fetched</div></div>
+    </div>
+  `;
+}
+
+function stuckHtml(stuck) {
+  const orphans = stuck.orphanedAuth.length
+    ? `<h5>Payments PENDING > ${STUCK_AGE_MIN}m without gateway_transaction_id <span style="color:var(--muted)">(mid-authorize crash)</span></h5>
+       <ul>${stuck.orphanedAuth.map(x => `
+         <li>order #${x.order.orderNumber} (${x.order.grandTotal} ${x.order.currency}) — payment updated ${fmtAge(x.payment.updatedAt)}
+             <button onclick="state.expanded='${x.order.id}'; render()">open</button></li>`).join("")}</ul>`
+    : "";
+  const missing = stuck.missingInvoice.length
+    ? `<h5>Orders paid but invoice PDF not generated <span style="color:var(--muted)">(Celery stuck?)</span></h5>
+       <ul>${stuck.missingInvoice.map(o => `
+         <li>order #${o.orderNumber} — paid ${fmtAge(o.updatedAt)}
+             <button onclick="state.expanded='${o.id}'; render()">open</button></li>`).join("")}</ul>`
+    : "";
+  const po = stuck.awaitingMarkPaid.length
+    ? `<h5>PO orders awaiting <code>mark-paid</code></h5>
+       <ul>${stuck.awaitingMarkPaid.map(o => `
+         <li>order #${o.orderNumber} (${o.grandTotal} ${o.currency}) — ${o.paymentTerms || "net_30"}, due ${o.paymentDueDate || "?"}
+             <button onclick="markPaid('${o.id}')">mark paid</button></li>`).join("")}</ul>`
+    : "";
+  const body = orphans + missing + po
+    || `<div class="none">Nothing needs attention right now.</div>`;
+  const countCls = stuck.total === 0 ? "zero" : stuck.orphanedAuth.length > 0 ? "bad" : "";
+  return `
+    <div class="stuck ${state.stuckOpen ? 'open' : 'closed'}">
+      <div class="head" onclick="state.stuckOpen=!state.stuckOpen; render()">
+        <span class="chev">▶</span> Stuck items
+        <span class="count ${countCls}">${stuck.total}</span>
+      </div>
+      <div class="body">${body}</div>
+    </div>
+  `;
+}
+
+function toolbarHtml(rows) {
+  const dr = state.filter.dateRange;
+  const dateBtn = (k, label) =>
+    `<button class="${dr === k ? 'active' : ''}" onclick="state.filter.dateRange='${k}'; render()">${label}</button>`;
+  return `
+    <div class="toolbar">
+      <div class="pill-group">
+        ${dateBtn("today", "Today")}
+        ${dateBtn("7d", "7d")}
+        ${dateBtn("30d", "30d")}
+        ${dateBtn("all", "All")}
+      </div>
+      <label>Status:
+        <select onchange="state.filter.status=this.value; loadOrders()">
+          <option value="">all</option>
+          <option ${state.filter.status==="pending"?"selected":""}>pending</option>
+          <option ${state.filter.status==="paid"?"selected":""}>paid</option>
+          <option ${state.filter.status==="fulfilled"?"selected":""}>fulfilled</option>
+          <option ${state.filter.status==="cancelled"?"selected":""}>cancelled</option>
+          <option ${state.filter.status==="refunded"?"selected":""}>refunded</option>
+        </select>
+      </label>
+      <label>Email:
+        <input type="text" size="22" placeholder="substring search"
+          value="${state.filter.emailQuery}"
+          onchange="state.filter.emailQuery=this.value"
+          onkeydown="if (event.key==='Enter') { state.filter.emailQuery=this.value; searchByEmail(); }">
+      </label>
+      <button class="secondary" onclick="searchByEmail()">Search</button>
+      ${state.filter.customerId ? `<button class="secondary" onclick="clearFilters()">Clear filters</button>` : ""}
+      <div class="spacer"></div>
+      <span class="count">${rows.length} of ${state.orders.length} shown</span>
+      <label class="auto-refresh">
+        <input type="checkbox" ${state.autoRefresh ? "checked" : ""}
+               onchange="toggleAutoRefresh(this.checked)"> auto (10s)
+      </label>
+      ${state.user?.isSuperuser
+        ? `<button class="secondary" onclick="runReconcile()" title="POST /admin/platform/ops/reconcile-payments">Reconcile</button>`
+        : ""}
+      <button class="primary" onclick="loadOrders()">Refresh</button>
+    </div>
+  `;
+}
+
+function sortHeader(label, key, align) {
+  const isActive = state.sort.key === key;
+  const arrow = isActive ? (state.sort.dir === "asc" ? "▲" : "▼") : "";
+  const onclick = `onclick="state.sort={key:'${key}', dir: state.sort.key==='${key}' && state.sort.dir==='desc' ? 'asc' : 'desc'}; render()"`;
+  return `<th class="sortable" ${onclick} style="text-align:${align || 'left'}">${label}${arrow ? ` <span class="sort-arrow">${arrow}</span>` : ""}</th>`;
+}
+
+function tableHtml(rows, stuckIds) {
+  if (state.loading) return `<div class="loading">loading…</div>`;
+  if (rows.length === 0) return `<div class="empty">no orders match the current filters</div>`;
+  const body = rows.map(o => {
+    const expanded = state.expanded === o.id;
+    const payCount = (o.payments || []).length;
+    const invMark = o.invoice ? `#${o.invoice.invoiceNumber}` : "—";
+    const stuckCls = stuckIds.has(o.id) ? " stuck-row" : "";
+    return `
+      <tr class="order-row${stuckCls}" onclick="toggle('${o.id}')">
+        <td><strong>#${o.orderNumber}</strong></td>
+        <td>${statusBadge(o.status)}</td>
+        <td>${fmtMoney(o.grandTotal, o.currency)}</td>
+        <td><code style="font-size:11px">${o.customerId.slice(0,8)}…</code>${o.isB2b ? ' <span class="badge b-default">B2B</span>' : ""}</td>
+        <td style="text-align:center">${payCount}</td>
+        <td>${invMark}</td>
+        <td style="color:var(--muted); font-size:11px">${fmtDate(o.createdAt)}</td>
+      </tr>
+      ${expanded ? `<tr class="detail-row"><td colspan="7">${detailHtml(o)}</td></tr>` : ""}
+    `;
+  }).join("");
+  return `
+    <table>
+      <thead><tr>
+        ${sortHeader("Order #", "orderNumber")}
+        ${sortHeader("Status", "status")}
+        ${sortHeader("Total", "grandTotal")}
+        <th>Customer</th>
+        <th style="text-align:center">Pmts</th>
+        <th>Invoice</th>
+        ${sortHeader("Created", "createdAt")}
+      </tr></thead>
+      <tbody>${body}</tbody>
+    </table>
+  `;
+}
+
+function detailHtml(o) {
+  const items = (o.items || []).map(i =>
+    `<li>${i.productSkuSnapshot} × ${i.quantity} @ ${i.unitPrice} = ${i.lineTotal} ${i.currency}</li>`).join("");
+  const payments = (o.payments || []).map(p => `
+    <div style="border-top:1px solid var(--rule); padding-top:8px; margin-top:8px;">
+      <div class="kv">
+        <b>status</b>      <span class="pi-status-${p.status}">${p.status}</span><br>
+        <b>amount</b>      ${fmtMoney(p.amount, p.currency)}<br>
+        <b>gateway</b>     ${p.gatewayName ?? "(PO – no gateway)"}<br>
+        <b>txn id</b>      <code>${p.gatewayTransactionId || "—"}</code><br>
+        <b>idempotency</b> <code>${p.idempotencyKey}</code><br>
+        <b>created</b>     ${fmtDate(p.createdAt)}<br>
+      </div>
+      ${p.gatewayResponse && Object.keys(p.gatewayResponse).length
+        ? `<div class="raw">${JSON.stringify(p.gatewayResponse, null, 2)}</div>` : ""}
+    </div>
+  `).join("");
+  const invoice = o.invoice
+    ? `<div class="kv">
+         <b>invoice #</b> ${o.invoice.invoiceNumber}<br>
+         <b>issued</b>    ${fmtDate(o.invoice.issuedAt)}<br>
+         <b>pdf</b>       ${o.invoice.pdfUrl
+            ? `<a href="${o.invoice.pdfUrl.replace(/\/\/minio:9000\b/, '//localhost:9000')}" target="_blank">download</a>`
+            : "(not generated yet)"}<br>
+       </div>`
+    : `<div class="kv" style="color:var(--muted)">no invoice yet</div>`;
+  const poFields = o.paymentTerms
+    ? `<div class="kv"><b>PO terms</b> ${o.paymentTerms}<br><b>due</b> ${o.paymentDueDate}<br>${o.poNumber ? `<b>PO #</b> ${o.poNumber}<br>` : ""}</div>`
+    : "";
+  const canMarkPaid = o.status === "pending" && (o.payments || []).some(p => p.status === "invoice_pending");
+  const markPaidBtn = canMarkPaid
+    ? `<button class="mark-paid" onclick="markPaid('${o.id}')">Mark Paid (PO)</button>` : "";
+
+  return `
+    <div class="detail">
+      <div class="grid">
+        <div>
+          <h4>Order</h4>
+          <div class="kv">
+            <b>id</b>         <code>${o.id}</code><br>
+            <b>customer</b>   <code>${o.customerId}</code><br>
+            <b>created</b>    ${fmtDate(o.createdAt)}<br>
+            <b>updated</b>    ${fmtDate(o.updatedAt)}<br>
+            <b>b2b?</b>       ${o.isB2b ? "yes" : "no"}${o.taxId ? ` (tax ${o.taxId})` : ""}<br>
+            <b>subtotal</b>   ${fmtMoney(o.subtotal, o.currency)}<br>
+            <b>discount</b>   ${fmtMoney(o.discountTotal, o.currency)}<br>
+            <b>grand</b>      <strong>${fmtMoney(o.grandTotal, o.currency)}</strong><br>
+          </div>
+          ${poFields}
+          <h4>Items</h4>
+          <ul>${items}</ul>
+          <h4>Invoice</h4>
+          ${invoice}
+          ${markPaidBtn}
+        </div>
+        <div>
+          <h4>Payments (${(o.payments || []).length})</h4>
+          ${payments || `<div class="kv" style="color:var(--muted)">no payment attempts</div>`}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+// ---------------------------------------------------------------------------
+// Main render
+// ---------------------------------------------------------------------------
+function render() {
+  const app = document.getElementById("app");
+
+  if (!state.token) {
+    const isLocal = /^(localhost|127\.0\.0\.1)$/i.test(location.hostname);
+    const m = location.hostname.match(/^(store-[ab])\.acme\.test$/i);
+    const sub = m ? m[1] : (isLocal ? "store-a" : null);
+    const letter = sub ? sub.slice(-1) : null;
+    const defaultEmail = sub ? `owner-${letter}@${sub}.test` : "";
+    const defaultPassword = sub ? `owner-${letter}-pass` : "";
+
+    app.innerHTML = `
+      <div class="login">
+        <h2>Acme Cart — Admin Dashboard</h2>
+        <form onsubmit="event.preventDefault(); login(this.email.value, this.password.value)">
+          <label>Email</label>
+          <input name="email" type="email" autocomplete="username" required
+                 value="${state.email || defaultEmail}">
+          <label>Password</label>
+          <input name="password" type="password" autocomplete="current-password" required
+                 value="${defaultPassword}">
+          <button type="submit">Log in</button>
+          ${state.err ? `<div class="err">${state.err}</div>` : ""}
+        </form>
+        <div class="hint">
+          Tenant admin token; subdomain decides which tenant's data you see.
+          ${sub
+            ? `Dev defaults pre-filled for <code>${sub}</code> — just click Log in.`
+            : `Default dev creds: <code>owner-a@store-a.test</code> /
+               <code>owner-a-pass</code> on <code>store-a.acme.test</code>.`}
+        </div>
+      </div>`;
+    return;
+  }
+
+  const rows = filteredOrders();
+  const stats = computeStats(state.orders);
+  const stuck = computeStuck(state.orders);
+  const stuckIds = new Set([
+    ...stuck.orphanedAuth.map(x => x.order.id),
+    ...stuck.missingInvoice.map(o => o.id),
+    ...stuck.awaitingMarkPaid.map(o => o.id),
+  ]);
+
+  app.innerHTML = `
+    ${headerHtml()}
+    <main>
+      ${statsHtml(stats, stuck)}
+      ${stuckHtml(stuck)}
+      ${toolbarHtml(rows)}
+      ${state.err ? `<div class="err">${state.err}</div>` : ""}
+      ${tableHtml(rows, stuckIds)}
+    </main>
+  `;
+}
+
+function toggle(id) {
+  state.expanded = (state.expanded === id) ? null : id;
+  render();
+}
+
+// ---------------------------------------------------------------------------
+// Boot
+// ---------------------------------------------------------------------------
+window.login = login;
+window.logout = logout;
+window.loadOrders = loadOrders;
+window.toggle = toggle;
+window.markPaid = markPaid;
+window.searchByEmail = searchByEmail;
+window.runReconcile = runReconcile;
+window.toggleAutoRefresh = toggleAutoRefresh;
+window.clearFilters = clearFilters;
+window.render = render;
+
+if (state.token) {
+  bootTimers();
+  loadOrders();
+  loadHealth();
+} else {
+  render();
+}
+</script>
+</body>
+</html>

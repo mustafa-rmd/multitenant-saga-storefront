@@ -1,0 +1,64 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.venv/
+venv/
+.python-version
+
+# Django
+*.log
+*.sqlite3
+local_settings.py
+media/
+staticfiles/
+
+# Celery beat (regenerated each run)
+celerybeat-schedule*
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Tests
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+# Captured fixture IDs from tests-ts/provision_fixtures.ts (per-DB state)
+tests-ts/.fixtures.json
+
+# Tooling
+.ruff_cache/
+.mypy_cache/
+
+# Editors
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Office lockfiles (Word/Excel/PowerPoint open-file sentinels)
+~$*
+
+# Claude Code
+.claude/
+CLAUDE.local.md
+
+# Build / dist
+build/
+dist/
+*.egg-info/
+
+# Node / Bun (TS test suite)
+node_modules/
+.biome-cache/
+
+# k6 run artefacts (JSON / CSV summaries, if exported)
+tests-ts/k6/results/
+tests-ts/k6/*.json
+!tests-ts/k6/scenarios/*.ts
+
+# Locks (we ship uv.lock; ignore pip-tools artifacts)
+requirements*.txt

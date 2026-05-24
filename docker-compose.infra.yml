@@ -1,0 +1,177 @@
+# Infra + Celery stack. Django is the only thing left to run natively
+# (so debugging, hot reload, and tests-ts driving the host port stay fast).
+# Usage: docker compose -f docker-compose.infra.yml up -d
+
+# Shared env for the Celery worker + beat containers. Both speak to the
+# other compose services by service name (postgres, redis, rabbitmq,
+# minio, stripe-mock), so they don't share .env with the host-side
+# Django (which uses localhost:* URLs).
+x-celery-env: &celery-env
+  DJANGO_SETTINGS_MODULE: config.settings.local
+  DJANGO_DEBUG: "True"
+  DJANGO_SECRET_KEY: dev-secret-do-not-use-in-prod-xxxxxxxxxxxxxxxxxxxxxxxx
+  DJANGO_ALLOWED_HOSTS: "*"
+  DATABASE_URL: postgres://app_user:app_user_pass@postgres:5432/acme_cart
+  DATABASE_ADMIN_URL: postgres://app_admin:app_admin_pass@postgres:5432/acme_cart
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: amqp://acme:acme@rabbitmq:5672//
+  CELERY_RESULT_BACKEND: redis://redis:6379/1
+  AWS_S3_ENDPOINT_URL: http://minio:9000
+  AWS_S3_REGION_NAME: us-east-1
+  AWS_S3_ADDRESSING_STYLE: path
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  STRIPE_API_BASE: http://stripe-mock:12111
+  STRIPE_UPLOAD_API_BASE: http://stripe-mock:12111
+  PAYMENTS_ALLOW_MOCK_GATEWAY: "True"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: postgres
+    environment:
+      POSTGRES_DB: acme_cart
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d acme_cart"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  rabbitmq:
+    image: rabbitmq:3.13-management-alpine
+    container_name: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: acme
+      RABBITMQ_DEFAULT_PASS: acme
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+
+  # Celery dashboard. Points at the same broker as the Django + worker
+  # processes, so anything `.delay()`-ed shows up here in real time.
+  #   UI: http://localhost:5555
+  # Surfaces live worker count, per-queue depth, task history, retry
+  # counts, and per-task tracebacks -- much faster than tailing worker
+  # logs when something queues up but doesn't run.
+  # Persistence: `--persistent` keeps task history across restarts in
+  # the mounted volume; otherwise restarting Flower wipes the timeline.
+  # Auth: in prod, set FLOWER_BASIC_AUTH=user:pass (or front it with
+  # the same auth proxy as the RabbitMQ console at :15672).
+  flower:
+    image: mher/flower:2.0
+    container_name: flower
+    environment:
+      CELERY_BROKER_URL: "amqp://acme:acme@rabbitmq:5672//"
+      FLOWER_PORT: 5555
+      FLOWER_PERSISTENT: "True"
+      FLOWER_DB: "/data/flower"
+      # FLOWER_BASIC_AUTH: "admin:admin"  # uncomment to gate the UI
+    ports:
+      - "5555:5555"
+    volumes:
+      - flower_data:/data
+    depends_on:
+      - rabbitmq
+
+  stripe-mock:
+    image: stripe/stripe-mock:latest
+    container_name: stripe_mock
+    ports:
+      - "12111:12111"
+      - "12112:12112"
+
+  # S3-compatible object storage. Stores invoice PDFs.
+  #   API:     http://localhost:9000  (boto3 / django-storages target)
+  #   Console: http://localhost:9001  (browse buckets in a browser)
+  # Using the Bitnami image because `MINIO_DEFAULT_BUCKETS` creates the
+  # `invoices` bucket with a `download` (public-read) policy at startup,
+  # so we don't need a separate mc init container. Credentials below are
+  # MinIO's well-known dev defaults; replace in prod.
+  minio:
+    # Bitnami moved their free image catalog to bitnamilegacy/ in mid-2025;
+    # `bitnami/minio` itself is now the paid "Bitnami Secure Images" channel.
+    # The legacy image is the same artifact and remains pullable without auth.
+    image: bitnamilegacy/minio:2025.7.23
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # Two buckets, both public-read in dev:
+      #   invoices: PDF invoices rendered by generate_invoice
+      #   media:    product images + future storefront assets
+      MINIO_DEFAULT_BUCKETS: "invoices:download,media:download"
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/bitnami/minio/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  # Celery worker — async task runner for invoice generation, webhook
+  # processing, reservation expiry, and the reconciliation sweep. Pool
+  # defaults to prefork (the Makefile's `-P solo` is a Windows-host
+  # workaround; inside Linux container that's unnecessary).
+  worker:
+    build: .
+    container_name: worker
+    command: ["celery", "-A", "config", "worker", "-l", "info"]
+    environment: *celery-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+      redis:
+        condition: service_started
+      minio:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # Celery beat — scheduler for periodic jobs (reservation expiry every
+  # 30s, reconciliation sweep every 5 min, abandoned-cart sweeper).
+  # Beat's schedule + last-run timestamps live in a mounted volume so
+  # restarting the container doesn't re-fire every job at startup.
+  beat:
+    build: .
+    container_name: beat
+    command: ["celery", "-A", "config", "beat", "-l", "info", "-s", "/var/celery/celerybeat-schedule"]
+    environment: *celery-env
+    volumes:
+      - beat_data:/var/celery
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_started
+      redis:
+        condition: service_started
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
+  minio_data:
+  flower_data:
+  beat_data:

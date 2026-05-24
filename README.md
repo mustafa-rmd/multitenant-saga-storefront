@@ -1,0 +1,457 @@
+# ecomm-django
+
+Multi-tenant cart system POC. Built for the Acme coding assignment.
+
+This is a working proof-of-concept, not a production system. It demonstrates the architectural decisions and the patterns that hold them together — tenant isolation at two layers, a pluggable payments interface, a checkout saga with explicit compensating actions, idempotency at every money-touching step, and a working test suite that covers the parts that actually matter.
+
+Where shortcuts were taken, they're documented in [§ Deliberately out of scope](#deliberately-out-of-scope) rather than hidden.
+
+---
+
+## Quickstart
+
+```powershell
+# Bring up infra (postgres, redis, rabbitmq, stripe-mock, minio) in Docker.
+make up
+
+# Apply migrations + create one platform-admin Django superuser. Everything
+# else — tenants, gateway configs, customers, products — is provisioned
+# via the admin REST API once you can log in.
+$env:DATABASE_URL = 'postgres://postgres:postgres@localhost:5432/acme_cart'
+make migrate
+make bootstrap   # platform@acme.test / platform-pass by default
+
+# Start the app processes in three terminals (or use `make run-all`).
+make runserver   # terminal 1
+make worker      # terminal 2
+make beat        # terminal 3
+```
+
+Now you have:
+
+- **API:**         http://localhost:8000/api/v1/docs/  (Swagger UI)
+- **RabbitMQ:**    http://localhost:15672  (acme / acme)
+- **stripe-mock:** http://localhost:12111
+- **MinIO console:** http://localhost:9001  (minioadmin / minioadmin — invoice PDFs land in the `invoices` bucket)
+- **Tenants** are accessed by subdomain: `store-a.acme.test` and `store-b.acme.test`. Add to your `/etc/hosts`:
+
+  ```
+  127.0.0.1  store-a.acme.test  store-b.acme.test
+  ```
+
+Hit the API as Alice (tenant A):
+
+```bash
+curl -H "X-Customer-Id: 00000000-0000-0000-0000-0000000000aa" \
+     -H "Host: store-a.acme.test" \
+     http://localhost:8000/api/v1/products
+```
+
+---
+
+## Architecture
+
+### Modular monolith
+
+One Django project, several apps, each owning a slice of the domain:
+
+```
+config/                 settings, URLs, Celery wiring
+apps/
+  core/                 tenant context, middleware, base models, RLS migration, error handling
+  tenants/              Tenant model and admin (the multi-tenancy root)
+  catalog/              Product (sku, price, stock)
+  customers/            Customer + Address (B2C and B2B)
+  coupons/              Coupon with constraint validation
+  payments/             PaymentMethod, gateway interface + adapters, PaymentService
+  carts/                Cart, CartItem, AppliedCoupon, CartService
+  orders/               Order, InventoryReservation, Invoice, CheckoutService (the saga)
+tests-ts/               Bun/TypeScript suite (HTTP black-box): tenant isolation, concurrency, idempotency, coupons, journey smoke
+```
+
+We picked modular monolith over microservices because: one DB, one auth domain, one team building it. Splitting now is premature. The app boundaries are clean enough to extract any single one into its own service if the load profile diverges later.
+
+### Tenant isolation: belt + suspenders
+
+Two independent layers, either of which would mostly work alone. Together, a bug in one cannot leak data.
+
+**Layer 1 — Application (Django manager).** Every tenant-scoped model inherits `TenantScopedModel`, which exposes two managers:
+
+- `objects` — auto-filtered by the current tenant from a `ContextVar`. With no tenant set, **returns empty** (fail closed).
+- `all_objects` — escape hatch for system code (Celery, admin commands, webhook tenant resolution). Every use is greppable.
+
+The tenant is set by `TenantResolverMiddleware` based on the request's subdomain.
+
+**Layer 2 — Database (Postgres RLS).** Every tenant-scoped table has a row-level security policy:
+
+```sql
+CREATE POLICY tenant_isolation ON catalog_product
+FOR ALL TO app_user
+USING (tenant_id = current_setting('app.current_tenant', true)::uuid)
+WITH CHECK (tenant_id = current_setting('app.current_tenant', true)::uuid);
+```
+
+`TenantDBSessionMiddleware` runs `SET LOCAL app.current_tenant = '...'` at the start of every request transaction. The application connects as `app_user` (RLS enforced); Celery and the Django admin connect as `app_admin` (`BYPASSRLS`) because they routinely operate across tenants.
+
+The policies use `FORCE ROW LEVEL SECURITY`, which means even the table owner can't bypass them. If `app.current_tenant` is unset, the predicate compares against NULL and returns no rows — fail closed at this layer too.
+
+**Cross-checks.** `CustomerAuthMiddleware` looks up the `Customer` via the RLS-scoped manager *after* `TenantDBSessionMiddleware` has set `app.current_tenant`. A customer ID from a different tenant returns 404, not the wrong row — the tenant guard is the database itself, not an application-level claim check.
+
+### Authentication
+
+Auth is intentionally a thin seam, not a full identity stack. The application reads `X-Customer-Id` from each request and resolves it to a `Customer` row. The header is trusted because the production path to it is trusted: an upstream identity-aware proxy (Cloudflare Access, an API gateway with JWT validation, an OIDC sidecar) is responsible for authenticating the user, deriving the customer ID, and stripping/rejecting forged client-supplied versions of the header.
+
+This is deliberate. The assignment evaluates tenant isolation, payments, and checkout correctness — not identity. Picking a specific OIDC server (Keycloak, Auth0, Cognito, etc.) would have been infrastructure that doesn't move any of those axes, and would have committed reviewers to an integration they may not use. The header seam is honest about that: swap in whatever real identity layer the deployment already has, and only `CustomerAuthMiddleware` changes.
+
+In local dev / tests, set the header directly (see Quickstart). In tests, `TESTING_DISABLE_AUTH=True` lets fixtures inject `request.user` instead.
+
+### Cart model
+
+One cart per customer, persistent, lazy-created on first item add. Status transitions:
+
+```
+            add item
+   ┌─────────────────────────►  active
+   │                              │
+   │                              │ POST /cart/checkout
+   │                              ▼
+   │     reservation expires   checking_out
+   │                              │
+   │   ◄──────────────────────────┤  payment ok       payment fails
+   │       (beat task)            │                   (compensating action)
+   │                              ▼                   reverts to active
+   │                          converted
+   │
+   └◄── 30 days idle ───────  abandoned
+```
+
+A `version` column increments on every mutation. Clients may opt into optimistic locking via `If-Match: <version>`. Even without it, mutations are serialized by `SELECT FOR UPDATE` on the cart row, so concurrent writes can't interleave. We do strict version checks only at checkout, where the cost of phantom changes matters.
+
+### Currency
+
+Per-tenant default currency, per-product currency, and a cart "locks in" its currency on first add. Cross-currency carts are rejected with `currency_mismatch`. Multi-currency carts (e.g. partial fiat + partial credits) are out of scope.
+
+### Pricing
+
+Price is snapshotted at add-time. The cart's totals stay stable as the customer browses. The trade-off: if the merchant raises a price between cart add and checkout, the customer still pays the snapshot price. The opposite — refusing checkout if prices changed — is a worse UX failure mode, and the merchant always has the option to enforce price-changed-revalidation at the cart layer if they want it later. Documented as a deliberate choice.
+
+### Checkout saga
+
+`CheckoutService.checkout()` is a seven-phase saga. Each phase commits in its own transaction so a worker crash leaves recoverable state, not a half-charged customer.
+
+| Phase | Action                                                       | On failure                                      |
+|-------|--------------------------------------------------------------|-------------------------------------------------|
+| 1     | `SELECT FOR UPDATE` cart, validate version, → `checking_out` | Domain error to caller                          |
+| 2     | Validate preconditions (items, addresses, payment, coupons)  | Revert cart to `active`                         |
+| 3     | Reserve stock (deterministic lock order to avoid deadlocks)  | Revert cart to `active`                         |
+| 4     | Create `Order` + `OrderItem`s, bump coupon `uses_count`      | Release reservations, revert cart               |
+| 5     | Authorize payment via gateway                                | Cancel order, release reservations, revert cart |
+| 6     | Cart → `converted`, link order to cart and reservations      | (phase 5 succeeded, no rollback needed here)    |
+| 7     | Sync gateways: capture now; async: wait for webhook          | Capture failure: leave order in `pending` for reconciliation |
+
+**Why each phase commits separately.** If we wrapped the whole saga in one big transaction, the cart would hold a row lock across the payment-gateway call. Network calls can take seconds. Holding a lock during a network call is a recipe for production outages. The saga model trades atomicity for liveness, with explicit compensating actions for every backward step.
+
+**Deterministic lock order.** When a cart has multiple products, we `SELECT FOR UPDATE` them sorted by UUID. Two concurrent checkouts containing the same set of products will acquire those product locks in the same order, eliminating one deadlock class.
+
+**Reservation TTL.** Reservations expire after 15 minutes. A Celery beat task (`release_expired_reservations`) runs every 30 seconds and releases expired ones with `SELECT FOR UPDATE SKIP LOCKED` to never block live checkouts.
+
+### Idempotency: three layers
+
+Every checkout requires an `Idempotency-Key` header. We defend at three places against the "client retries because the network blinked" case:
+
+1. **App short-circuit.** Before doing anything, `CheckoutService` looks up an `Order` by `idempotency_key`. If one exists, we return it. No DB writes, no gateway calls.
+
+2. **DB unique constraint.** `Order.idempotency_key` and `Payment.idempotency_key` are both `UNIQUE`. If two concurrent retries somehow bypass the lookup, the second insert fails. Defense in depth.
+
+3. **Gateway-native.** The same key (with a `:auth` suffix) is passed to the gateway as its own idempotency key. So even if our DB row got created but the gateway call was lost, the retry hits the gateway's idempotency cache and gets the same result.
+
+The `Payment` row is persisted in `PENDING` status **before** the gateway call. If the gateway succeeds but our process dies before we can update the row, on retry the unique constraint refuses the new row, and a reconciliation job can detect rows with `PENDING` + no `gateway_transaction_id` to investigate.
+
+### Payments: pluggable gateways
+
+`PaymentGateway` is an ABC. Each implementation is a single file in `apps/payments/gateways/`:
+
+```python
+class PaymentGateway(ABC):
+    name: str
+    @abstractmethod
+    def authorize(self, *, credentials, amount, currency, payment_method_token,
+                  idempotency_key, metadata=None) -> PaymentIntent: ...
+    @abstractmethod
+    def capture(...) -> PaymentIntent: ...
+    @abstractmethod
+    def refund(...) -> PaymentIntent: ...
+    @abstractmethod
+    def tokenize(...) -> TokenizedPaymentMethod: ...
+    @abstractmethod
+    def verify_webhook(...) -> bool: ...
+    @abstractmethod
+    def parse_webhook(...) -> WebhookEvent: ...
+    def supports_currency(self, currency) -> bool: return True
+```
+
+Implementations are stateless. Per-tenant credentials are passed in a `GatewayCredentials` dataclass on every call. The cart and order code never see gateway-specific objects — only normalized `PaymentIntent` and `WebhookEvent`. Adding a new gateway is one file plus one `register()` call.
+
+Two gateways ship:
+
+- **`MockPaymentGateway`** — first-class implementation. Outcomes are controllable from the metadata dict (`{"mock_outcome": "decline" | "requires_action" | "success"}`). Used in tests and local dev.
+- **`StripeGateway`** — skeletal but real. Points at `stripe-mock` via `STRIPE_API_BASE`. Demonstrates the adapter pattern with a real SDK. Production-grade Stripe integration would need additional work (full event taxonomy, customer flows, automatic payment methods); see [§ Deliberately out of scope](#deliberately-out-of-scope).
+
+#### Payment testing strategy
+
+`stripe-mock` validates request shapes (URLs, params, headers, idempotency keys) but is stateless and doesn't simulate full payment flows. For tests that exercise success/failure logic, we use the `MockPaymentGateway`. `stripe-mock` exists for integration tests that prove our request construction is correct against Stripe's published OpenAPI spec — a different layer of correctness.
+
+### Webhooks
+
+`POST /api/v1/webhooks/payments/{gateway_name}` is exempt from auth and tenant-subdomain resolution (gateways don't know our tenant subdomains). The tenant is resolved by looking up the `Payment` row by `gateway_transaction_id` — this is the one place we deliberately query with `Payment.all_objects` (the unscoped manager). Signature verification happens before any state mutation. Actual processing is deferred to a `TenantAwareTask` Celery worker.
+
+### Reconciliation and dead-letter queue
+
+The brief frames the system as "outage = money lost", which puts a specific class of bug at the centre: a worker that crashes between calling the gateway and persisting the result. The `Payment` row exists in `PENDING`, the gateway may have charged, and nothing in the request-response cycle will ever notice.
+
+`reconcile_pending_payments` is the safety net. It runs every five minutes via Celery beat (`config/celery.py`), sweeps `Payment` rows in `PENDING` older than ten minutes, and converges each row to the truth:
+
+- **Has `gateway_transaction_id`** — call `gateway.retrieve_payment()` and apply the returned status. If the gateway says PENDING, leave it for the next pass (3DS / async authorize that hasn't completed yet).
+- **No `gateway_transaction_id`** — we can't safely retry the charge (the `payment_method_token` lives on the cart, not the payment), so we mark the payment FAILED, cancel the order, and release reservations. The matching `Order.idempotency_key` UNIQUE constraint guarantees a client retry doesn't create a second order.
+
+The cross-tenant outer query routes through the `admin` DB alias (BYPASSRLS); per-row work sets both the Python `tenant_context` ContextVar and the Postgres `app.current_tenant` GUC, so the existing tenant-scoped helpers used by the webhook path (`_commit_reservations_for_order`, `_release_reservations_for_order`) are reused without modification. `SELECT FOR UPDATE SKIP LOCKED` on the inner per-row lock means the sweep never blocks live checkouts.
+
+The dead-letter queue is the safety net's safety net. RabbitMQ queue `acme.default` is declared with `x-dead-letter-exchange='acme.dlx'`; `acme.dlq` is the terminal sink with no consumer. A `_DeadLetterMixin` base class catches `on_failure` for terminal failures (after `autoretry_for` exhausts `max_retries`) and publishes a JSON record — task name, args, exception class, exception message, ISO timestamp — to the DLQ. Operators inspect via the RabbitMQ console at <http://localhost:15672>. Every task has explicit `max_retries`, exponential backoff, and jitter; the financial-path tasks (`process_webhook_event`, `generate_invoice`) retry five times; the cross-tenant sweepers (`reconcile_pending_payments`, `release_expired_reservations`, `abandon_stale_carts`) retry three times.
+
+### B2B
+
+`Customer` has `customer_type` (B2C/B2B), `tax_id`, and `company_name` fields. At checkout, `is_b2b` and `tax_id` are snapshotted onto the `Order`. Coupons can be restricted to B2C-only or B2B-only via the `customer_type_restriction` field.
+
+**Purchase-order payment method.** B2B customers can save a `purchase_order` payment method (`POST /customers/{id}/payment-methods` with `methodType: "purchase_order"`, `paymentTerms: "net_30"`). At checkout, the saga's phase 5 branches: instead of calling a gateway, it records a `Payment` row in `INVOICE_PENDING`, snapshots `payment_terms` + `payment_due_date` + `po_number` onto the `Order`, commits stock immediately (ship-first model), and fires the invoice task. The order stays in `PENDING` until a tenant admin posts `POST /admin/orders/{id}/mark-paid` once the wire/cheque clears — that flips the payment to `CAPTURED` and the order to `PAID`. The endpoint is idempotent and refuses non-PO orders by inference (an already-PAID card order is a no-op).
+
+The PO path is a second branch on the same saga, not a parallel flow — phases 1-4 and 6 are shared with the card path, so coupon validation, stock reservation, idempotency, and tenant scoping all behave identically. Reconciliation (`reconcile_pending_payments`) filters on `status=PENDING` only, so `INVOICE_PENDING` rows are naturally excluded. `cancel_order` knows to reverse committed reservations for PO orders (restores `stock_quantity`) since the ship-first commit happens at checkout, not at capture.
+
+What's still out of scope: B2B-specific workflows beyond PO (formal purchase-order submission with PDF attachments, credit-limit enforcement, quote-to-order conversion, net-30 dunning).
+
+### Per-tenant order numbering
+
+Order numbers are sequential per tenant (not globally), and are pulled from per-tenant Postgres sequences:
+
+```sql
+CREATE SEQUENCE IF NOT EXISTS order_number_seq_<tenant_uuid_underscored> START 1000;
+SELECT nextval('...');
+```
+
+The first checkout for a tenant pays a one-time DDL cost to create its sequence. Subsequent checkouts are a single `nextval()`. This is cheaper than an in-table counter (no row lock) and gives strict monotonicity within a tenant.
+
+---
+
+## API surface
+
+All endpoints under `/api/v1`. Mutations return the full cart state in the response.
+
+| Method | Path                                                        | Purpose                                  |
+|--------|-------------------------------------------------------------|------------------------------------------|
+| GET    | `/health`                                                   | Liveness check (no auth, no tenant)      |
+| GET    | `/docs/`                                                    | Swagger UI                               |
+| GET    | `/products`                                                 | List active products                     |
+| POST   | `/customers/{id}/addresses`                                 | Add an address                           |
+| POST   | `/customers/{id}/payment-methods`                           | Tokenize and save a payment method       |
+| GET    | `/cart`                                                     | Get cart with totals                     |
+| POST   | `/cart/items`                                               | Add an item (lazy-creates the cart)      |
+| DELETE | `/cart/items/{item_id}`                                     | Remove an item                           |
+| POST   | `/cart/coupons`                                             | Apply a coupon                           |
+| DELETE | `/cart/coupons/{code}`                                      | Remove a coupon                          |
+| PUT    | `/cart/shipping-address`                                    | Set shipping address                     |
+| PUT    | `/cart/billing-address`                                     | Set billing address                     |
+| PUT    | `/cart/payment-method`                                      | Select payment method                    |
+| POST   | `/cart/checkout`                                            | Convert to order. Needs `Idempotency-Key`. |
+| GET    | `/orders/{id}`                                              | Order detail                             |
+| GET    | `/orders/{id}/invoice`                                      | Invoice (if generated)                   |
+| POST   | `/webhooks/payments/{gateway}`                              | Gateway webhook ingestion                |
+| POST   | `/admin/orders/{id}/mark-paid`                              | Tenant-admin: flip a PO order to PAID    |
+
+### Admin API (separate auth rail)
+
+The admin REST surface lives under `/api/v1/admin/` and uses a separate auth rail from the storefront — Django `User` + DRF token auth, never `X-Customer-Id`. Two audiences share the tree:
+
+- **Tenant-admin** (per-tenant store operator). Endpoints live under the tenant's subdomain (`store-a.acme.test/api/v1/admin/...`). Tenant resolution + Postgres RLS still apply; a tenant-admin token issued for store-a returns `403` if used against store-b.
+- **Platform-admin** (Zid staff). Endpoints live under the reserved `admin.acme.test` subdomain and route ORM calls through the `app_admin` DB alias (BYPASSRLS) so they can operate across tenants.
+
+A user becomes a tenant-admin via a `TenantMembership(user, tenant, role)` row (one Django User can admin many tenants). A user becomes a platform-admin via `is_superuser=True` — no membership rows; superusers are also accepted on tenant-admin endpoints for support escalations.
+
+Issue a token with `POST /api/v1/admin/auth/login`, then send it as `Authorization: Token <key>` on subsequent calls. `POST /api/v1/admin/auth/logout` deletes the token row.
+
+| Method | Path                                                    | Audience       |
+|--------|---------------------------------------------------------|----------------|
+| POST   | `/admin/auth/login`                                     | Both (open)    |
+| POST   | `/admin/auth/logout`                                    | Both           |
+| GET    | `/admin/auth/me`                                        | Both           |
+| GET / POST            | `/admin/products`                          | Tenant-admin   |
+| GET / PATCH / DELETE  | `/admin/products/{id}`                     | Tenant-admin   |
+| POST / DELETE         | `/admin/products/{id}/image`               | Tenant-admin (multipart upload to MinIO/S3) |
+| GET / POST            | `/admin/coupons`                           | Tenant-admin   |
+| GET / PATCH / DELETE  | `/admin/coupons/{id}`                      | Tenant-admin   |
+| GET / POST            | `/admin/payment-gateways`                  | Tenant-admin   |
+| GET / PATCH / DELETE  | `/admin/payment-gateways/{id}`             | Tenant-admin   |
+| GET / POST            | `/admin/customers`                         | Tenant-admin   |
+| GET / PATCH / DELETE  | `/admin/customers/{id}`                    | Tenant-admin   |
+| GET                   | `/admin/orders`                            | Tenant-admin   |
+| GET                   | `/admin/orders/{id}`                       | Tenant-admin   |
+| GET / POST            | `/admin/platform/tenants`                  | Platform-admin |
+| GET / PATCH           | `/admin/platform/tenants/{id}`             | Platform-admin |
+| POST                  | `/admin/platform/tenants/{id}/memberships` | Platform-admin |
+| DELETE                | `/admin/platform/memberships/{id}`         | Platform-admin |
+| GET                   | `/admin/platform/customers?email=`         | Platform-admin |
+| POST                  | `/admin/platform/ops/reconcile-payments`   | Platform-admin (force a reconciliation sweep) |
+
+**Seeded admin credentials** (rotate or remove before any non-local deployment):
+
+| Role           | Email                | Password         |
+|----------------|----------------------|------------------|
+| Platform admin | `platform@acme.test` | `platform-pass`  |
+| Store-a admin  | `owner-a@store-a.test` | `owner-a-pass` |
+| Store-b admin  | `owner-b@store-b.test` | `owner-b-pass` |
+
+Two implementation choices worth noting:
+
+- **`PlatformAdminAPIView` routes through the `admin` DB alias explicitly** (`using="admin"` on every viewset). BYPASSRLS would happily return cross-tenant rows from a misplaced `.objects.all()`; the explicit-alias convention makes the escape obvious at every call site.
+- **`IsPlatformAdmin` / `IsTenantAdmin` start with `isinstance(request.user, User)`** before checking flags or memberships. The storefront's `MiddlewareCustomerAuthentication` sets `request.user` to a `Customer` instance; without the type check, a Customer-typed user with a stray truthy attribute would slip past DRF's stock `IsAuthenticated`.
+
+#### Customer admin + the soft-delete / block primitive
+
+Tenant admins can CRUD their tenant's Customer rows (`/admin/customers`), including a `POST` for B2B pre-provisioning. The `customerType=B2B` path requires `taxId` + `companyName` so any order snapshotted off the customer is invoiceable. Identity itself is still owned by the upstream IdP — `POST /admin/customers` creates the application record only; the customer can't sign in via `X-Customer-Id` until the IdP knows the email.
+
+`DELETE /admin/customers/{id}` and `PATCH { "isActive": false }` are the same primitive: both flip `Customer.is_active=False`. `CustomerAuthMiddleware` then refuses that `X-Customer-Id` with `401 customer_not_found` (no enumeration). Reactivate by `PATCH { "isActive": true }`. Hard delete is impossible — `Order.customer` is `on_delete=PROTECT`.
+
+`GET /admin/platform/customers?email=<substring>` is the platform-admin escape hatch for support tickets that span tenants. The `email` param is mandatory (no accidental table dumps), and every row carries `tenantSubdomain` so the support agent can hop into the right store.
+
+### Response envelope
+
+Success:
+
+```json
+{ "data": { ... }, "meta": { "request_id": "...", "version": "v1" } }
+```
+
+Errors:
+
+```json
+{
+  "errors": [
+    {"code": "insufficient_stock", "detail": "Only 1 available, 3 requested",
+     "meta": {"product_id": "...", "available": 1, "requested": 3}}
+  ],
+  "meta": { "request_id": "...", "version": "v1" }
+}
+```
+
+### Error code reference
+
+| HTTP | Code                          | Meaning                                                |
+|------|-------------------------------|--------------------------------------------------------|
+| 400  | `tenant_required`             | No tenant subdomain in request                         |
+| 400  | `idempotency_key_required`    | Checkout without `Idempotency-Key` header              |
+| 401  | `missing_customer_id`         | Request lacks `X-Customer-Id` header                   |
+| 401  | `customer_not_found`          | `X-Customer-Id` doesn't resolve in the current tenant  |
+| 403  | `forbidden`                   | Authenticated but not allowed                          |
+| 404  | `tenant_not_found`            | Subdomain doesn't resolve to a tenant                  |
+| 404  | `cart_not_found`              | Cart doesn't exist or belongs to another customer      |
+| 404  | `product_not_found`           | Product gone or inactive                               |
+| 404  | `coupon_not_found`            | Coupon code doesn't exist on this tenant               |
+| 409  | `currency_mismatch`           | Adding a product in a different currency than the cart |
+| 409  | `insufficient_stock`          | Not enough stock to satisfy request                    |
+| 409  | `cart_not_checkout_ready`     | Missing address, payment method, etc.                  |
+| 409  | `cart_version_conflict`       | `If-Match` version didn't match current version        |
+| 409  | `coupon_invalid`              | Coupon failed some other constraint                    |
+| 409  | `coupon_already_applied`      | Coupon is already on this cart                         |
+| 409  | `coupon_min_not_met`          | Cart subtotal below coupon's minimum                   |
+| 409  | `coupon_country_restricted`   | Shipping country not in coupon's allowed list          |
+| 409  | `coupon_exhausted`            | `max_uses` reached                                     |
+| 409  | `gateway_unsupported_currency`| Selected gateway doesn't support cart currency         |
+| 410  | `coupon_expired`              | Past `valid_until`                                     |
+| 402  | `payment_failed`              | Gateway declined                                       |
+| 422  | `validation_error`            | Request body schema violation; `source.pointer` for the field |
+
+---
+
+## Tests
+
+The test suite is TypeScript and runs under Bun against a live Django server. It treats the system as a black box and exercises everything reachable through the HTTP surface.
+
+```powershell
+# Make sure the server (and infra) is up, then:
+bun test --cwd tests-ts
+```
+
+Or via Make:
+
+```powershell
+make test
+```
+
+Files in `tests-ts/`:
+
+- **`tenant-isolation.test.ts`** — cross-tenant catalogue separation, customer-scoped-per-tenant, indirect-reference isolation (Bob can't bind Alice's address), unknown-subdomain routing.
+- **`cart-operations.test.ts`** — lazy creation, increment on re-add, currency lock-in + mismatch, insufficient stock, unknown product, version bumps, removal + currency unlock, totals math.
+- **`idempotency.test.ts`** — duplicate-key replay returns the same order; 10 concurrent retries with the same key all converge on one `order_id`; stale `If-Match` + missing key both fail with the documented error codes.
+- **`concurrency.test.ts`** — two customers race for `stock=1` over `Promise.all`; exactly one wins; the other gets `409 insufficient_stock`; product ends fully consumed.
+- **`coupons.test.ts`** — every constraint dimension (min, expiry/not-yet-valid, max_uses, country, customer type, fixed-currency); percent + fixed discount math; cap-at-subtotal; re-apply / remove / not-found.
+- **`journey.test.ts`** — full end-to-end smoke walk of the storefront flow (26 tests across Stages 0–9: tenant resolution → catalog → cart → checkout → invoice).
+
+What is **not** covered by the TS suite (in-process invariants you can only check from inside Python):
+
+- Manager-level fail-closed when `app.current_tenant` is unset.
+- `Model.all_objects` (UnscopedManager) escape hatch.
+- The `Tenant` root model being unscoped.
+- Postgres RLS at the raw-SQL layer.
+
+These are still worth verifying when touching `apps/core/models.py` or the RLS migration — easiest via `manage.py shell`.
+
+---
+
+## Deliberately out of scope
+
+These are conscious omissions, not oversights. Calling them out so reviewers don't have to wonder.
+
+- **Encryption at rest for gateway credentials.** Currently plaintext JSONB on `PaymentGatewayConfig`. Real deployment: KMS-encrypted, decrypted at access time via `build_credentials()`. The decryption boundary is already isolated in one helper.
+- **Full Stripe production integration.** The `StripeGateway` demonstrates the adapter pattern and handles the common path. It doesn't cover the full event taxonomy, customer flows, automatic payment methods, partial refund chaining, dispute handling, or radar.
+- ~~**PDF invoice rendering.**~~ Done. `generate_invoice` renders a PDF via reportlab and uploads it to the configured S3-compatible bucket (MinIO in dev — see `docker-compose.infra.yml` + the `STORAGES['invoices']` config in `config/settings/base.py`). The task is split into two idempotent steps so a partial failure (DB row created, upload errored) recovers cleanly on retry. URLs returned by `GET /orders/{id}/invoice` are stable (public-read bucket in dev; flip `AWS_QUERYSTRING_AUTH=True` for presigned URLs in prod).
+- ~~**Reconciliation jobs.**~~ Done. `reconcile_pending_payments` runs every 5 minutes via Celery beat (`config/celery.py`) and sweeps `Payment` rows stuck in `PENDING` longer than 10 minutes. For rows with a `gateway_transaction_id` it asks the gateway via `retrieve_payment()` and converges to that truth; for rows without one (the worker-crashed-mid-authorize case the brief calls out as "outage = money lost") it marks the payment FAILED, cancels the order, and releases reservations. The cross-tenant outer query routes through the `admin` DB alias (BYPASSRLS); per-row work sets the tenant GUC so the tenant-scoped helpers from the webhook path reuse cleanly.
+- **Rate limiting.** No application-level rate limiter. In production this would live at the edge (Cloudflare, nginx) and/or as DRF throttle classes per-customer.
+- ~~**Dead-letter queue.**~~ Done. `config/celery.py` declares queue `acme.default` with `x-dead-letter-exchange='acme.dlx'`; `acme.dlq` is the terminal sink (no consumer). On top of the queue-level DLX, a `_DeadLetterMixin` base class (used by `TenantAwareTask` and the cross-tenant `DurableTask`) catches `on_failure` after `max_retries` is exhausted and publishes a JSON "death certificate" — task name, args, exception, timestamp — to the DLQ. Operators inspect via the RabbitMQ console at <http://localhost:15672>. Every task now has explicit `max_retries` + exponential backoff + jitter; the financial path (`process_webhook_event`, `generate_invoice`) retries 5x; the cross-tenant sweepers retry 3x.
+- **Cart merge resolver.** If a customer were to be authenticated mid-session (rare in our model — auth is required upfront), merging an anonymous cart into their persistent cart needs a real resolution policy. We require auth from the start, so this doesn't arise.
+- **Tax calculation.** No tax engine. Orders have no tax field. Real Saudi VAT handling needs a calculation layer (jurisdiction by shipping address, exempt products, B2B reverse charge). Out of scope.
+- **FX conversion.** No multi-currency conversion within a cart. Currency is locked on first add. Cross-currency baskets are explicitly rejected.
+- ~~**B2B-specific flows.**~~ Partial. Purchase-order payment method + net-30 snapshot + admin `mark-paid` endpoint are implemented (see [§ B2B](#b2b)). Quote-to-order workflows, formal PO document attachments, and credit-limit enforcement remain out of scope.
+- **Two-factor auth, login rate-limiting, and token rotation for the admin REST surface.** Admin tokens are long-lived bearer secrets revocable via `POST /admin/auth/logout`; a real deployment should layer rate-limiting at the edge, add 2FA, and rotate tokens on a schedule.
+- **Auto-generated migrations are hand-written for the first revision.** They reflect the exact model state, but if you `makemigrations` you'll likely see some "auto-detected" cleanup migrations on top. That's expected.
+- **Soft deletes.** Hard deletes throughout. Some tables (especially `Order`) probably want soft delete in a real system.
+
+---
+
+## Why these choices
+
+A few things that are non-obvious from the code:
+
+**Why ContextVars and not threading.local.** Django supports async views and Celery 5 has async modes. `threading.local` works for sync code but breaks under asyncio because awaits cross thread boundaries. `ContextVar` is the modern correct choice and propagates across async tasks within a single thread.
+
+**Why two Postgres roles instead of one.** Postgres RLS lets you grant `BYPASSRLS` to specific roles. Application traffic is `app_user` (filtered). Celery workers, the Django admin, and migrations need to operate across tenants, so they use `app_admin` (`BYPASSRLS`). One role would force us to choose between "RLS protects nothing" and "Celery can't operate".
+
+**Why `ATOMIC_REQUESTS=True` on the default DB.** It lets us use `SET LOCAL app.current_tenant`, which is scoped to the current transaction. With `ATOMIC_REQUESTS=False`, we'd need session-scoped `SET` plus a `RESET` in a `finally` block — fiddly and easy to leak across connection-pooled requests.
+
+**Why pragmatic-merge for cart mutations but strict-version at checkout.** Two clicks of "+" on the same item should yield quantity 2, not a 409. Mutations on a cart are commutative within a single product, and `SELECT FOR UPDATE` serializes them naturally. But at checkout, the customer needs to see the cart they're authorizing payment against — that's where a phantom change between the GET and the POST is a real bug, so optimistic locking via `If-Match` makes sense there.
+
+**Why the saga is seven explicit phases, not one big transaction.** The payment authorize call is a network call. Network calls take time. Holding a `SELECT FOR UPDATE` cart row lock during a network call is how production systems get into "all customers blocked on one slow gateway" outages. The saga trades atomicity for liveness, with explicit compensating actions documented per-phase.
+
+**Why an in-memory module-level gateway registry.** Gateways are stateless; their per-tenant credentials are passed at call time. Module-level dict is the simplest possible registry, and the registration happens at import time so it's always consistent. No DB query per gateway lookup.
+
+---
+
+## File map
+
+The most important files to look at first:
+
+1. **`apps/orders/services/checkout.py`** — the saga. If anything reads as "ah, that's the system", it's this file.
+2. **`apps/core/middleware/`** — the three-stage middleware that drives tenant isolation.
+3. **`apps/core/models.py`** — the base abstract model and the two-manager pattern.
+4. **`apps/core/migrations/0001_enable_rls.py`** — the database-layer half of tenant isolation.
+5. **`apps/payments/gateways/base.py`** — the seam that makes payments pluggable.
+6. **`apps/carts/services.py`** — cart business logic, including the `_bump_and_return` pattern.
+7. **`apps/payments/tasks.py`** — `reconcile_pending_payments`, the "outage = money lost" safety net. Pair-read with `apps/core/celery_helpers.py` for the DLQ wiring.
+8. **`tests-ts/concurrency.test.ts`** — the proof that the row locks do what we think they do (two parallel HTTP checkouts for `stock=1`; exactly one wins).
