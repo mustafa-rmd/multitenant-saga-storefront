@@ -1,8 +1,6 @@
-# Mltitenant Saga Storefront
+# Multitenant Saga Storefront
 
-Multi-tenant cart system POC.
-
-This is a working proof-of-concept, not a production system. It demonstrates the architectural decisions and the patterns that hold them together — tenant isolation at two layers, a pluggable payments interface, a checkout saga with explicit compensating actions, idempotency at every money-touching step, and a working test suite that covers the parts that actually matter.
+Multi-tenant cart system POC. Tenant isolation at two layers, pluggable payments, a checkout saga with compensating actions, idempotency at every money-touching step, and an HTTP-level test suite.
 
 ---
 
@@ -67,7 +65,7 @@ apps/
 tests-ts/               Bun/TypeScript suite (HTTP black-box): tenant isolation, concurrency, idempotency, coupons, journey smoke
 ```
 
-We picked modular monolith over microservices because: one DB, one auth domain, one team building it. Splitting now is premature. The app boundaries are clean enough to extract any single one into its own service if the load profile diverges later.
+App boundaries are clean enough to extract any single one into its own service later.
 
 ### Tenant isolation: belt + suspenders
 
@@ -97,11 +95,9 @@ The policies use `FORCE ROW LEVEL SECURITY`, which means even the table owner ca
 
 ### Authentication
 
-Auth is intentionally a thin seam, not a full identity stack. The application reads `X-Customer-Id` from each request and resolves it to a `Customer` row. The header is trusted because the production path to it is trusted: an upstream identity-aware proxy (Cloudflare Access, an API gateway with JWT validation, an OIDC sidecar) is responsible for authenticating the user, deriving the customer ID, and stripping/rejecting forged client-supplied versions of the header.
+Auth is a thin seam: the application reads `X-Customer-Id` from each request and resolves it to a `Customer` row. The header is trusted because the production path to it is trusted — an upstream identity-aware proxy (Cloudflare Access, an API gateway with JWT validation, an OIDC sidecar) authenticates the user, derives the customer ID, and strips forged client-supplied versions. Swap in any real identity layer and only `CustomerAuthMiddleware` changes.
 
-This is deliberate. The assignment evaluates tenant isolation, payments, and checkout correctness — not identity. Picking a specific OIDC server (Keycloak, Auth0, Cognito, etc.) would have been infrastructure that doesn't move any of those axes, and would have committed reviewers to an integration they may not use. The header seam is honest about that: swap in whatever real identity layer the deployment already has, and only `CustomerAuthMiddleware` changes.
-
-In local dev / tests, set the header directly (see Quickstart). In tests, `TESTING_DISABLE_AUTH=True` lets fixtures inject `request.user` instead.
+In local dev / tests, set the header directly. `TESTING_DISABLE_AUTH=True` lets fixtures inject `request.user` instead.
 
 ### Cart model
 
@@ -131,7 +127,7 @@ Per-tenant default currency, per-product currency, and a cart "locks in" its cur
 
 ### Pricing
 
-Price is snapshotted at add-time. The cart's totals stay stable as the customer browses. The trade-off: if the merchant raises a price between cart add and checkout, the customer still pays the snapshot price. The opposite — refusing checkout if prices changed — is a worse UX failure mode, and the merchant always has the option to enforce price-changed-revalidation at the cart layer if they want it later. Documented as a deliberate choice.
+Price is snapshotted at add-time. If the merchant changes a price between cart-add and checkout, the customer pays the snapshot price. Merchant-side price-changed revalidation can be enforced at the cart layer later if needed.
 
 ### Checkout saga
 
@@ -147,7 +143,7 @@ Price is snapshotted at add-time. The cart's totals stay stable as the customer 
 | 6     | Cart → `converted`, link order to cart and reservations      | (phase 5 succeeded, no rollback needed here)    |
 | 7     | Sync gateways: capture now; async: wait for webhook          | Capture failure: leave order in `pending` for reconciliation |
 
-**Why each phase commits separately.** If we wrapped the whole saga in one big transaction, the cart would hold a row lock across the payment-gateway call. Network calls can take seconds. Holding a lock during a network call is a recipe for production outages. The saga model trades atomicity for liveness, with explicit compensating actions for every backward step.
+Wrapping the saga in one big transaction would hold the cart row lock across the payment-gateway network call — the classic recipe for "all customers blocked on one slow gateway" outages. The saga trades atomicity for liveness, with explicit compensating actions per phase.
 
 **Deterministic lock order.** When a cart has multiple products, we `SELECT FOR UPDATE` them sorted by UUID. Two concurrent checkouts containing the same set of products will acquire those product locks in the same order, eliminating one deadlock class.
 
@@ -197,7 +193,7 @@ Two gateways ship:
 
 #### Payment testing strategy
 
-`stripe-mock` validates request shapes (URLs, params, headers, idempotency keys) but is stateless and doesn't simulate full payment flows. For tests that exercise success/failure logic, we use the `MockPaymentGateway`. `stripe-mock` exists for integration tests that prove our request construction is correct against Stripe's published OpenAPI spec — a different layer of correctness.
+`stripe-mock` is stateless and validates request shapes against Stripe's OpenAPI spec — used for integration tests that prove request construction. `MockPaymentGateway` exercises success/failure logic — used for behavioural tests.
 
 ### Webhooks
 
@@ -205,16 +201,16 @@ Two gateways ship:
 
 ### Reconciliation and dead-letter queue
 
-The brief frames the system as "outage = money lost", which puts a specific class of bug at the centre: a worker that crashes between calling the gateway and persisting the result. The `Payment` row exists in `PENDING`, the gateway may have charged, and nothing in the request-response cycle will ever notice.
+The "outage = money lost" failure mode: a worker crashes between calling the gateway and persisting the result. The `Payment` row sits in `PENDING`, the gateway may have charged, and nothing in the request-response cycle will notice.
 
-`reconcile_pending_payments` is the safety net. It runs every five minutes via Celery beat (`config/celery.py`), sweeps `Payment` rows in `PENDING` older than ten minutes, and converges each row to the truth:
+`reconcile_pending_payments` (Celery beat, every 5 minutes) sweeps `Payment` rows in `PENDING` older than 10 minutes:
 
-- **Has `gateway_transaction_id`** — call `gateway.retrieve_payment()` and apply the returned status. If the gateway says PENDING, leave it for the next pass (3DS / async authorize that hasn't completed yet).
-- **No `gateway_transaction_id`** — we can't safely retry the charge (the `payment_method_token` lives on the cart, not the payment), so we mark the payment FAILED, cancel the order, and release reservations. The matching `Order.idempotency_key` UNIQUE constraint guarantees a client retry doesn't create a second order.
+- **Has `gateway_transaction_id`** — call `gateway.retrieve_payment()` and apply the returned status. If still PENDING (3DS / async authorize), leave it for the next pass.
+- **No `gateway_transaction_id`** — can't safely retry the charge (the `payment_method_token` lives on the cart, not the payment); mark the payment FAILED, cancel the order, release reservations. The `Order.idempotency_key` UNIQUE constraint guarantees a client retry doesn't create a second order.
 
-The cross-tenant outer query routes through the `admin` DB alias (BYPASSRLS); per-row work sets both the Python `tenant_context` ContextVar and the Postgres `app.current_tenant` GUC, so the existing tenant-scoped helpers used by the webhook path (`_commit_reservations_for_order`, `_release_reservations_for_order`) are reused without modification. `SELECT FOR UPDATE SKIP LOCKED` on the inner per-row lock means the sweep never blocks live checkouts.
+The cross-tenant outer query routes through the `admin` DB alias (BYPASSRLS); per-row work sets both the Python `tenant_context` ContextVar and the Postgres `app.current_tenant` GUC, so tenant-scoped helpers from the webhook path are reused as-is. `SELECT FOR UPDATE SKIP LOCKED` on the inner per-row lock keeps the sweep from blocking live checkouts.
 
-The dead-letter queue is the safety net's safety net. RabbitMQ queue `acme.default` is declared with `x-dead-letter-exchange='acme.dlx'`; `acme.dlq` is the terminal sink with no consumer. A `_DeadLetterMixin` base class catches `on_failure` for terminal failures (after `autoretry_for` exhausts `max_retries`) and publishes a JSON record — task name, args, exception class, exception message, ISO timestamp — to the DLQ. Operators inspect via the RabbitMQ console at <http://localhost:15672>. Every task has explicit `max_retries`, exponential backoff, and jitter; the financial-path tasks (`process_webhook_event`, `generate_invoice`) retry five times; the cross-tenant sweepers (`reconcile_pending_payments`, `release_expired_reservations`, `abandon_stale_carts`) retry three times.
+**Dead-letter queue.** RabbitMQ `acme.default` declares `x-dead-letter-exchange='acme.dlx'`; `acme.dlq` is the terminal sink (no consumer). A `_DeadLetterMixin` catches `on_failure` after `max_retries` exhausts and publishes a JSON record (task, args, exception, timestamp) to the DLQ. Every task has explicit `max_retries` + exponential backoff + jitter; financial-path tasks retry 5x, cross-tenant sweepers retry 3x.
 
 ### B2B
 
