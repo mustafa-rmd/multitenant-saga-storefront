@@ -1,6 +1,6 @@
-# ecomm-django
+# Mltitenant Saga Storefront
 
-Multi-tenant cart system POC. Built for the Acme coding assignment.
+Multi-tenant cart system POC.
 
 This is a working proof-of-concept, not a production system. It demonstrates the architectural decisions and the patterns that hold them together — tenant isolation at two layers, a pluggable payments interface, a checkout saga with explicit compensating actions, idempotency at every money-touching step, and a working test suite that covers the parts that actually matter.
 
@@ -29,7 +29,7 @@ Now you have:
 
 - **API:**         http://localhost:8000/api/v1/docs/  (Swagger UI)
 - **RabbitMQ:**    http://localhost:15672  (acme / acme)
-- **stripe-mock:** http://localhost:12111
+- **Stripe-mock:** http://localhost:12111
 - **MinIO console:** http://localhost:9001  (minioadmin / minioadmin — invoice PDFs land in the `invoices` bucket)
 - **Tenants** are accessed by subdomain: `store-a.acme.test` and `store-b.acme.test`. Add to your `/etc/hosts`:
 
