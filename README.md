@@ -4,8 +4,6 @@ Multi-tenant cart system POC. Built for the Acme coding assignment.
 
 This is a working proof-of-concept, not a production system. It demonstrates the architectural decisions and the patterns that hold them together — tenant isolation at two layers, a pluggable payments interface, a checkout saga with explicit compensating actions, idempotency at every money-touching step, and a working test suite that covers the parts that actually matter.
 
-Where shortcuts were taken, they're documented in [§ Deliberately out of scope](#deliberately-out-of-scope) rather than hidden.
-
 ---
 
 ## Quickstart
@@ -195,7 +193,7 @@ Implementations are stateless. Per-tenant credentials are passed in a `GatewayCr
 Two gateways ship:
 
 - **`MockPaymentGateway`** — first-class implementation. Outcomes are controllable from the metadata dict (`{"mock_outcome": "decline" | "requires_action" | "success"}`). Used in tests and local dev.
-- **`StripeGateway`** — skeletal but real. Points at `stripe-mock` via `STRIPE_API_BASE`. Demonstrates the adapter pattern with a real SDK. Production-grade Stripe integration would need additional work (full event taxonomy, customer flows, automatic payment methods); see [§ Deliberately out of scope](#deliberately-out-of-scope).
+- **`StripeGateway`** — skeletal but real. Points at `stripe-mock` via `STRIPE_API_BASE`. Demonstrates the adapter pattern with a real SDK. Production-grade Stripe integration would need additional work (full event taxonomy, customer flows, automatic payment methods).
 
 #### Payment testing strategy
 
@@ -402,44 +400,6 @@ What is **not** covered by the TS suite (in-process invariants you can only chec
 - Postgres RLS at the raw-SQL layer.
 
 These are still worth verifying when touching `apps/core/models.py` or the RLS migration — easiest via `manage.py shell`.
-
----
-
-## Deliberately out of scope
-
-These are conscious omissions, not oversights. Calling them out so reviewers don't have to wonder.
-
-- **Encryption at rest for gateway credentials.** Currently plaintext JSONB on `PaymentGatewayConfig`. Real deployment: KMS-encrypted, decrypted at access time via `build_credentials()`. The decryption boundary is already isolated in one helper.
-- **Full Stripe production integration.** The `StripeGateway` demonstrates the adapter pattern and handles the common path. It doesn't cover the full event taxonomy, customer flows, automatic payment methods, partial refund chaining, dispute handling, or radar.
-- ~~**PDF invoice rendering.**~~ Done. `generate_invoice` renders a PDF via reportlab and uploads it to the configured S3-compatible bucket (MinIO in dev — see `docker-compose.infra.yml` + the `STORAGES['invoices']` config in `config/settings/base.py`). The task is split into two idempotent steps so a partial failure (DB row created, upload errored) recovers cleanly on retry. URLs returned by `GET /orders/{id}/invoice` are stable (public-read bucket in dev; flip `AWS_QUERYSTRING_AUTH=True` for presigned URLs in prod).
-- ~~**Reconciliation jobs.**~~ Done. `reconcile_pending_payments` runs every 5 minutes via Celery beat (`config/celery.py`) and sweeps `Payment` rows stuck in `PENDING` longer than 10 minutes. For rows with a `gateway_transaction_id` it asks the gateway via `retrieve_payment()` and converges to that truth; for rows without one (the worker-crashed-mid-authorize case the brief calls out as "outage = money lost") it marks the payment FAILED, cancels the order, and releases reservations. The cross-tenant outer query routes through the `admin` DB alias (BYPASSRLS); per-row work sets the tenant GUC so the tenant-scoped helpers from the webhook path reuse cleanly.
-- **Rate limiting.** No application-level rate limiter. In production this would live at the edge (Cloudflare, nginx) and/or as DRF throttle classes per-customer.
-- ~~**Dead-letter queue.**~~ Done. `config/celery.py` declares queue `acme.default` with `x-dead-letter-exchange='acme.dlx'`; `acme.dlq` is the terminal sink (no consumer). On top of the queue-level DLX, a `_DeadLetterMixin` base class (used by `TenantAwareTask` and the cross-tenant `DurableTask`) catches `on_failure` after `max_retries` is exhausted and publishes a JSON "death certificate" — task name, args, exception, timestamp — to the DLQ. Operators inspect via the RabbitMQ console at <http://localhost:15672>. Every task now has explicit `max_retries` + exponential backoff + jitter; the financial path (`process_webhook_event`, `generate_invoice`) retries 5x; the cross-tenant sweepers retry 3x.
-- **Cart merge resolver.** If a customer were to be authenticated mid-session (rare in our model — auth is required upfront), merging an anonymous cart into their persistent cart needs a real resolution policy. We require auth from the start, so this doesn't arise.
-- **Tax calculation.** No tax engine. Orders have no tax field. Real Saudi VAT handling needs a calculation layer (jurisdiction by shipping address, exempt products, B2B reverse charge). Out of scope.
-- **FX conversion.** No multi-currency conversion within a cart. Currency is locked on first add. Cross-currency baskets are explicitly rejected.
-- ~~**B2B-specific flows.**~~ Partial. Purchase-order payment method + net-30 snapshot + admin `mark-paid` endpoint are implemented (see [§ B2B](#b2b)). Quote-to-order workflows, formal PO document attachments, and credit-limit enforcement remain out of scope.
-- **Two-factor auth, login rate-limiting, and token rotation for the admin REST surface.** Admin tokens are long-lived bearer secrets revocable via `POST /admin/auth/logout`; a real deployment should layer rate-limiting at the edge, add 2FA, and rotate tokens on a schedule.
-- **Auto-generated migrations are hand-written for the first revision.** They reflect the exact model state, but if you `makemigrations` you'll likely see some "auto-detected" cleanup migrations on top. That's expected.
-- **Soft deletes.** Hard deletes throughout. Some tables (especially `Order`) probably want soft delete in a real system.
-
----
-
-## Why these choices
-
-A few things that are non-obvious from the code:
-
-**Why ContextVars and not threading.local.** Django supports async views and Celery 5 has async modes. `threading.local` works for sync code but breaks under asyncio because awaits cross thread boundaries. `ContextVar` is the modern correct choice and propagates across async tasks within a single thread.
-
-**Why two Postgres roles instead of one.** Postgres RLS lets you grant `BYPASSRLS` to specific roles. Application traffic is `app_user` (filtered). Celery workers, the Django admin, and migrations need to operate across tenants, so they use `app_admin` (`BYPASSRLS`). One role would force us to choose between "RLS protects nothing" and "Celery can't operate".
-
-**Why `ATOMIC_REQUESTS=True` on the default DB.** It lets us use `SET LOCAL app.current_tenant`, which is scoped to the current transaction. With `ATOMIC_REQUESTS=False`, we'd need session-scoped `SET` plus a `RESET` in a `finally` block — fiddly and easy to leak across connection-pooled requests.
-
-**Why pragmatic-merge for cart mutations but strict-version at checkout.** Two clicks of "+" on the same item should yield quantity 2, not a 409. Mutations on a cart are commutative within a single product, and `SELECT FOR UPDATE` serializes them naturally. But at checkout, the customer needs to see the cart they're authorizing payment against — that's where a phantom change between the GET and the POST is a real bug, so optimistic locking via `If-Match` makes sense there.
-
-**Why the saga is seven explicit phases, not one big transaction.** The payment authorize call is a network call. Network calls take time. Holding a `SELECT FOR UPDATE` cart row lock during a network call is how production systems get into "all customers blocked on one slow gateway" outages. The saga trades atomicity for liveness, with explicit compensating actions documented per-phase.
-
-**Why an in-memory module-level gateway registry.** Gateways are stateless; their per-tenant credentials are passed at call time. Module-level dict is the simplest possible registry, and the registration happens at import time so it's always consistent. No DB query per gateway lookup.
 
 ---
 
